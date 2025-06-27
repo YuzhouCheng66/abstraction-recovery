@@ -1,6 +1,6 @@
-from gbp import Gaussian, Variable, Factor
-from gbp import update_variable, update_factor, factor_energy, tree_stack, l2
-from factor import  h_fn, h2_fn, h3_fn, h4_fn, h5_fn, h6_fn, h7_fn, h8_fn
+from .gbp import Gaussian, Variable, Factor
+from .gbp import update_variable, update_factor, factor_energy, tree_stack, l2
+from .factor import  h_fn, h2_fn, h3_fn, h4_fn, h5_fn
 from typing import Dict, List, Tuple
 import jax
 import jax.numpy as jnp
