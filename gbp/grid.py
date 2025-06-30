@@ -68,8 +68,7 @@ def generate_grid_slam_data(H=16, W=16, dx=1.0, dy=1.0, prior_noise_std=0.05, od
                 nbr = (i + 1) * W + j
                 rel = positions[nbr] - positions[idx]
                 noise = np.random.randn(2) * odom_noise_std
-                #z = (rel + noise).tolist()
-                z = noise.tolist()
+                z = (rel + noise).tolist()
                 between_meas.append((idx, nbr, z))
 
     return positions, prior_meas, between_meas

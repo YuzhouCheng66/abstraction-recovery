@@ -60,9 +60,6 @@ varis_coarser, prior_facs_coarser, horizontal_facs_coarser, vertical_facs_coarse
     num_iters=30, visualize=True, prior_h=h6_fn, between_h=[h7_fn,h8_fn]
 )
 
-
-
-
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
@@ -290,14 +287,12 @@ layout = go.Layout(
         }
     ]
 
-
-    
 )
+
 
 # Create and display figure
 fig = go.Figure(data=frames[0].data, frames=frames, layout=layout)
 fig.show()
-
 
 
 
