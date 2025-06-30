@@ -171,7 +171,6 @@ def factor_update(factor, xs, h_fn, w):
     h = h_fn(xs)
     J = jax.jacrev(h_fn)(xs).reshape(h.size, xs.size) # Jacobian auto-diff (J_s)
 
-
     z = factor.z # I think this is a vector
     z_Lam = factor.z_Lam
     
@@ -261,3 +260,4 @@ def huber(e, t):
 @jax.jit
 def l2(e, _):
     return 1.0
+

@@ -181,12 +181,35 @@ def build_pose_slam_graph(N, prior_meas, between_meas, prior_std=0.05, odom_std=
 
 
 def gbp_solve(varis, prior_facs, between_facs, num_iters=50, visualize=False, prior_h=h_fn, between_h=h2_fn):
+    """
+    Run GBP on a fine grid.
+
+    Parameters:
+    - varis: Variable objects to be inferred 
+    - prior_facs: unary factors (priors on single variables)
+    - between_facs: binary factors (between connected variable pairs)
+    - num_iters: number of message passing iterations
+    - visualize: whether to record energy and variable estimates during optimization
+    - prior_h: measurement function for prior factors (default: h_fn)
+    - between_h: measurement function for between factors (default: h2_fn)
+
+    Returns:
+    - varis: updated variables after inference
+    - prior_facs: updated prior factors
+    - between_facs: updated between factors
+    - energy_log: array of total energy at each iteration (empty if visualize=False)
+    - positions_log: array of linearization points per iteration (empty if visualize=False)
+    """
+
     energy_log = []
+    positions_log = []
     
+    # First iteration: update variables with only prior factors
+    varis, vtof_msgs, linpoints = update_variable(varis)
+    prior_facs, varis = update_factor(prior_facs, varis, vtof_msgs, linpoints, prior_h, l2)
 
     if visualize:
-        varis, vtof_msgs, linpoints = update_variable(varis)
-        # Energy computation
+        # Linearization points and energy computation
         prior_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
             prior_facs, linpoints[prior_facs.adj_var_id[:, 0]], prior_h
         ))
@@ -198,34 +221,36 @@ def gbp_solve(varis, prior_facs, between_facs, num_iters=50, visualize=False, pr
         energy = prior_energy + between_energy
         energy_log.append(energy)
 
+        positions_log.append(linpoints)
 
-    for i in range(num_iters):
+
+    for i in range(num_iters-1):
         # Step 1: Variable update
         varis, vtof_msgs, linpoints = update_variable(varis)
 
-        # Step 2: Factor update
+
+        # Step 2: Factor update, both prior and between factors
         prior_facs, varis = update_factor(prior_facs, varis, vtof_msgs, linpoints, prior_h, l2)
         between_facs, varis = update_factor(between_facs, varis, vtof_msgs, linpoints, between_h, l2)
 
-
+        # Step 3: Linearlization points and energy computation
         if visualize:
-            # Step 3: Energy computation
+            
             prior_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
                 prior_facs, linpoints[prior_facs.adj_var_id[:, 0]], prior_h
             ))
-    
+
             between_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
                 between_facs, linpoints[between_facs.adj_var_id], between_h
             ))
-    
+
             energy = prior_energy + between_energy
             energy_log.append(energy)
+
+            positions_log.append(linpoints)
         
 
-    # Step 4: Keep linpoints
-    linpoints = jax.vmap(lambda x: x.mu())(varis.belief)  
-        
-    return varis, prior_facs, between_facs, np.array(energy_log), linpoints
+    return varis, prior_facs, between_facs, np.array(energy_log), np.array(positions_log)
 
 
 
@@ -475,32 +500,14 @@ def build_coarse_slam_graph(
 
 def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_between_facs, num_iters=50, visualize=False, prior_h=h3_fn, between_h=[h4_fn,h5_fn]):
     energy_log = []
+    positions_log = []
+
     
-    """
-    if visualize:
-        varis, vtof_msgs, linpoints = update_variable(varis)
-        # Energy computation
-        prior_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
-            prior_facs, linpoints[prior_facs.adj_var_id[:, 0]], prior_h
-        ))
-
-        horizontal_between_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
-            horizontal_between_facs, linpoints[horizontal_between_facs.adj_var_id], between_h[0]
-        ))
-
-        vertical_between_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
-            vertical_between_facs, linpoints[vertical_between_facs.adj_var_id], between_h[1]
-        ))
-
-        energy = prior_energy + horizontal_between_energy + vertical_between_energy
-        energy_log.append(energy)
-    """ 
-    
-    # Initialize variable with priors 
+    # Initialize variable with only priors factors 
     varis, vtof_msgs, linpoints = update_variable(varis)
     prior_facs, varis = update_factor(prior_facs, varis, vtof_msgs, linpoints, prior_h, l2)
     if visualize:
-        # Energy computation
+        # Linearization points and energy computation
         prior_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
             prior_facs, linpoints[prior_facs.adj_var_id[:, 0]], prior_h
         ))
@@ -509,7 +516,6 @@ def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_betwee
             horizontal_between_facs, linpoints[horizontal_between_facs.adj_var_id], between_h[0]
         ))
 
-
         vertical_between_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
             vertical_between_facs, linpoints[vertical_between_facs.adj_var_id], between_h[1]
         ))
@@ -517,6 +523,8 @@ def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_betwee
 
         energy = prior_energy + horizontal_between_energy + vertical_between_energy
         energy_log.append(energy)
+
+        positions_log.append(linpoints)
 
 
     for i in range(num_iters-1):
@@ -526,7 +534,6 @@ def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_betwee
         # Step 2: Factor update
         prior_facs, varis = update_factor(prior_facs, varis, vtof_msgs, linpoints, prior_h, l2)
 
-
         horizontal_between_facs, varis = update_factor(horizontal_between_facs, varis, vtof_msgs, 
                                                        linpoints, between_h[0], l2)
 
@@ -534,7 +541,7 @@ def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_betwee
                                                        linpoints, between_h[1], l2)
         
         if visualize:
-            # Step 3: Energy computation
+            # Step 3: Linearization points and energy computation
             prior_energy = jnp.sum(jax.vmap(factor_energy, in_axes=(0, 0, None))(
                 prior_facs, linpoints[prior_facs.adj_var_id[:, 0]], prior_h
             ))
@@ -550,12 +557,11 @@ def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_betwee
             energy = prior_energy + horizontal_between_energy + vertical_between_energy
 
             energy_log.append(energy)
-        
+            positions_log.append(linpoints)
 
-    # Step 4: Keep linpoints
-    linpoints = jax.vmap(lambda x: x.mu())(varis.belief)  
         
-    return varis, prior_facs, horizontal_between_facs, vertical_between_facs, np.array(energy_log), linpoints
+    return varis, prior_facs, horizontal_between_facs, vertical_between_facs, \
+            np.array(energy_log), np.array(positions_log)
 
 
 
