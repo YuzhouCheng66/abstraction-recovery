@@ -8,7 +8,7 @@ import numpy as np
 
 
 
-def generate_grid_slam_data(H=16, W=16, dx=1.0, dy=1.0, prior_noise_std=0.05, odom_noise_std=0.05, seed=0):
+def generate_grid_slam_data(H=16, W=16, dx=1.0, dy=1.0, prior_noise_std=1, odom_noise_std=0.1, seed=0):
     """
     Generate 2D SLAM data over a regular H x W grid.
 
@@ -75,7 +75,7 @@ def generate_grid_slam_data(H=16, W=16, dx=1.0, dy=1.0, prior_noise_std=0.05, od
 
 
 
-def build_pose_slam_graph(N, prior_meas, between_meas, prior_std=0.05, odom_std=0.05, Ni_v=10, D=2):
+def build_pose_slam_graph(N, prior_meas, between_meas, prior_std=1, odom_std=0.1, Ni_v=10, D=2):
     """
     Build a 2D pose-SLAM factor graph with:
     - N variable nodes (each 2D position)
@@ -179,7 +179,7 @@ def build_pose_slam_graph(N, prior_meas, between_meas, prior_std=0.05, odom_std=
 
 
 
-def gbp_solve(varis, prior_facs, between_facs, num_iters=50, visualize=False, prior_h=h_fn, between_h=h2_fn):
+def gbp_solve(varis, prior_facs, between_facs, num_iters=30, visualize=False, prior_h=h_fn, between_h=h2_fn):
     """
     Run GBP on a fine grid.
 
@@ -254,13 +254,10 @@ def gbp_solve(varis, prior_facs, between_facs, num_iters=50, visualize=False, pr
 
 
 def build_coarse_slam_graph(
-    varis_fine: Variable,
     prior_facs_fine: Factor,
     between_facs_fine: Factor,
     H: int, W: int,
     stride: int = 2,
-    prior_std: float = 1.0,
-    between_std: float = 0.1,
 ) -> Tuple[Variable, Factor, Factor]:
     D = 2
     patch_map: Dict[int, List[int]] = {}
@@ -324,9 +321,6 @@ def build_coarse_slam_graph(
                 i = jnp.argmax(mask)
                 z_i = prior_facs_fine.z[i]
                 z_Lam_i = prior_facs_fine.z_Lam[i]
-            else:
-                z_i = jnp.zeros((D,))
-                z_Lam_i = (1. / (prior_std ** 2)) * jnp.eye(D)
             residuals.append(z_i)
             precisions.append(z_Lam_i)
 
@@ -344,9 +338,6 @@ def build_coarse_slam_graph(
                 
                 residuals.append(z)
                 precisions.append(z_Lam)
-            else:
-                residuals.append(jnp.zeros((D,)))
-                precisions.append((1. / (between_std ** 2)) * jnp.eye(D))
 
         z = jnp.concatenate(residuals)
         z_Lam = jax.scipy.linalg.block_diag(*precisions)
@@ -404,9 +395,7 @@ def build_coarse_slam_graph(
                         z_Lam = between_facs_fine.z_Lam[k]
                         if a_k == b:
                             z = -z
-                    else:
-                        z = jnp.zeros((D,))
-                        z_Lam = (1. / (between_std ** 2)) * jnp.eye(D)
+
                     residuals.append(z)
                     precisions.append(z_Lam)
 
@@ -447,9 +436,7 @@ def build_coarse_slam_graph(
                         z_Lam = between_facs_fine.z_Lam[k]
                         if a_k == b:
                             z = -z
-                    else:
-                        z = jnp.zeros((D,))
-                        z_Lam = (1. / (between_std ** 2)) * jnp.eye(D)
+
                     residuals.append(z)
                     precisions.append(z_Lam)
 
@@ -565,7 +552,6 @@ def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_betwee
 
 
 def build_coarser_slam_graph(
-    varis_coarse: Variable,
     prior_facs_coarse: Factor,
     horizontal_between_facs: Factor,
     vertical_between_facs: Factor,
