@@ -105,7 +105,7 @@ def h5_fn(xs):
 @jax.jit
 def h6_fn(x):
     """
-    Predicts measurement h(x) for coarse prior.
+    Predicts measurement h(x) for coarser prior.
 
     Input:
         x: (32,) → 4 stacked coarse-level varibales (each 8D)
@@ -203,4 +203,6 @@ def h8_fn(xs):
     r4 = xj[10:12] - xi[30:32]
 
     return jnp.concatenate([r1, r2, r3, r4])  # shape (8,)
+
+
 
