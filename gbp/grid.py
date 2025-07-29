@@ -484,6 +484,100 @@ def build_coarse_slam_graph(
 
 
 
+
+def build_abs_slam_graph(
+    varis_sup: Variable,
+    prior_facs_sup: Factor,
+    horizontal_facs_sup: Factor,
+    vertical_facs_sup: Factor,
+    r = 2) -> Tuple[Variable, Factor, Factor]:
+
+    abs_beliefs = []
+    abs_msgs_eta = []
+    abs_msgs_Lam = []
+    abs_adj_factor_idx = []
+    Bs = []
+    ks = []
+
+    # === 1. Build Abstraction Variables ===
+    varis_sup_mu = varis_sup.belief.mu()
+    varis_sup_sigma = varis_sup.belief.sigma()
+
+    for i in range(len(varis_sup.var_id)):
+        varis_sup_mu_i = varis_sup_mu[i]
+        varis_sup_sigma_i = varis_sup_sigma[i]
+
+        eigvals, eigvecs = np.linalg.eigh(varis_sup_sigma_i)
+
+        # Step 2: Sort eigenvalues and eigenvectors in descending order of eigenvalues
+        idx = np.argsort(eigvals)[::-1]      # Get indices of sorted eigenvalues (largest first)
+        eigvals = eigvals[idx]               # Reorder eigenvalues
+        eigvecs = eigvecs[:, idx]            # Reorder corresponding eigenvectors
+
+        # Step 3: Select the top-k eigenvectors to form the projection matrix (principal subspace)
+        r = r
+        B_reduced = eigvecs[:, :r]                 # B_reduced: shape (8, r), projects 8D to rD
+
+        Bs.append(B_reduced)                        # Store the projection matrix for this variable
+
+        # Step 4: Project eta and Lam onto the reduced 2D subspace
+        # This gives the natural parameters of the reduced 2D Gaussian
+        varis_abs_mu_i = B_reduced.T @ varis_sup_mu_i          # Projected natural mean: shape (2,)
+        varis_abs_sigma_i = B_reduced.T @ varis_sup_sigma_i @ B_reduced  # Projected covariance: shape (2, 2)
+        ks.append(varis_sup_mu_i - B_reduced @ varis_abs_mu_i)  # Store the offset for this variable
+
+        varis_abs_lam_i = jnp.linalg.inv(varis_abs_sigma_i)  # Inverse covariance (precision matrix): shape (2, 2)
+        varis_abs_eta_i = varis_abs_lam_i @ varis_abs_mu_i  # Natural parameters: shape (2,)
+        abs_beliefs.append(Gaussian(varis_abs_eta_i, varis_abs_lam_i))
+
+
+    N, Ni_v, _ = varis_sup.msgs.eta.shape
+    abs_msgs = Gaussian(jnp.zeros((N, Ni_v, r)), jnp.zeros((N, Ni_v, r, r)))  # messages (eta, Lambda) to each factor port
+
+    varis_abs = Variable(
+        var_id=varis_sup.var_id,
+        belief=tree_stack(abs_beliefs, axis=0),
+        msgs=abs_msgs,
+        adj_factor_idx=jnp.stack(varis_sup.adj_factor_idx),
+    )
+
+    # === 2. Build Abs Priors ===
+    prior_facs_abs = Factor(
+        factor_id=prior_facs_sup.factor_id,
+        z=prior_facs_sup.z,
+        z_Lam=prior_facs_sup.z_Lam,
+        threshold=prior_facs_sup.threshold,
+        potential=None,
+        adj_var_id=prior_facs_sup.adj_var_id,
+        adj_var_idx=prior_facs_sup.adj_var_idx,
+    )
+
+    # === Build Horizontal & Vertical Between Factors Separately ===
+    horizontal_facs_abs = Factor(
+        factor_id=horizontal_facs_sup.factor_id,
+        z= horizontal_facs_sup.z,
+        z_Lam= horizontal_facs_sup.z_Lam,
+        threshold= horizontal_facs_sup.threshold,
+        potential=None,
+        adj_var_id= horizontal_facs_sup.adj_var_id,
+        adj_var_idx= horizontal_facs_sup.adj_var_idx,
+    )   
+
+    vertical_facs_abs = Factor(
+        factor_id=vertical_facs_sup.factor_id,
+        z= vertical_facs_sup.z,
+        z_Lam= vertical_facs_sup.z_Lam,
+        threshold= vertical_facs_sup.threshold,
+        potential=None,                                         
+        adj_var_id= vertical_facs_sup.adj_var_id,
+        adj_var_idx= vertical_facs_sup.adj_var_idx,
+    )
+
+    return varis_abs, prior_facs_abs, horizontal_facs_abs, vertical_facs_abs, jnp.asarray(Bs), jnp.asarray(ks)
+
+
+
+
 def gbp_solve_coarse(varis, prior_facs, horizontal_between_facs, vertical_between_facs, num_iters=50, visualize=False, prior_h=h3_fn, between_h=[h4_fn,h5_fn]):
     energy_log = []
     positions_log = []

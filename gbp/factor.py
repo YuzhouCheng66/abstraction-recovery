@@ -205,4 +205,107 @@ def h8_fn(xs):
     return jnp.concatenate([r1, r2, r3, r4])  # shape (8,)
 
 
+@jax.jit
+def h3_fn_tilde(x, B, k):
+    """
+    Predicts measurement h(x) for abs prior.
+
+    Input:
+        x: (2,) → 2D abstraction of 4 stacked fine-level variables
+        B: (8,2) → projection matrix from 2D to 8D
+    Output:
+        z_hat: (16,) = [x0, x1, x2, x3, x1-x0, x2-x0, x3-x1, x3-x2]
+    """
+
+    x = x.reshape(-1)
+    B = B.reshape(8, -1)  # Ensure B is the correct shape
+    k = k.reshape(-1)  # Ensure k is the correct shape
+
+    x = B @ x + k  # Project 2D abstraction to 8D
+    
+    x0 = x[0:2]
+    x1 = x[2:4]
+    x2 = x[4:6]
+    x3 = x[6:8]
+
+    # 4 priors (just xi)
+    z_hat_0 = x0
+    z_hat_1 = x1
+    z_hat_2 = x2
+    z_hat_3 = x3
+
+    # 4 internal between
+    z_hat_4 = x1 - x0
+    z_hat_5 = x2 - x0
+    z_hat_6 = x3 - x1
+    z_hat_7 = x3 - x2
+
+    return jnp.concatenate([
+        z_hat_0, z_hat_1, z_hat_2, z_hat_3,
+        z_hat_4, z_hat_5, z_hat_6, z_hat_7
+    ])
+
+
+@jax.jit
+def h4_fn_tilde(xs, Bs, ks):
+    """
+    Predicts coarse between measurement h(xs) where:
+      - xs[0] is coarse variable i (8D)
+      - xs[1] is coarse variable j (8D)
+    Fixed: uses v01→v02 and v11→v12 edges
+    
+    Returns:
+        z_hat: shape (4,) = two 2D relative positions
+    """
+    xi = xs[0]
+    xj = xs[1]
+    Bi = Bs[0]
+    Bj = Bs[1]
+    ki = ks[0]
+    kj = ks[1]
+
+    # Project coarse variables to 8D
+    xi = Bi @ xi + ki  # shape (8,)
+    xj = Bj @ xj + kj  # shape (8,)
+
+    # First residual: xj[0:2] - xi[2:4]  (v02 - v01)
+    r1 = xj[0:2] - xi[2:4]
+
+    # Second residual: xj[4:6] - xi[6:8] (v12 - v11)
+    r2 = xj[4:6] - xi[6:8]
+
+    return jnp.concatenate([r1, r2])  # shape (4,)
+
+
+@jax.jit
+def h5_fn_tilde(xs, Bs, ks):
+    """
+    Predicts coarse between measurement h(xs) where:
+      - xs[0] is coarse variable i (8D)
+      - xs[1] is coarse variable j (8D)
+    Fixed: uses v10→v20 and v11→v21 edges
+
+    Returns:
+        z_hat: shape (4,) = two 2D relative positions
+    """
+    xi = xs[0]
+    xj = xs[1]
+    Bi = Bs[0]
+    Bj = Bs[1]
+    ki = ks[0]
+    kj = ks[1]
+
+
+    # Project coarse variables to 8D
+    xi = Bi @ xi + ki  # shape (8,)
+    xj = Bj @ xj + kj # shape (8,)  
+
+    # First residual: xj[0:2] - xi[4:6]  (v20 - v10)
+    r1 = xj[0:2] - xi[4:6]
+
+    # Second residual: xj[2:4] - xi[6:8] (v21 - v11)
+    r2 = xj[2:4] - xi[6:8]
+
+    return jnp.concatenate([r1, r2])  # shape (4,)
+
 

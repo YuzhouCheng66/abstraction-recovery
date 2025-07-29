@@ -261,3 +261,61 @@ def huber(e, t):
 def l2(e, _):
     return 1.0
 
+
+
+@partial(jax.jit, static_argnames=["h_fn", "w"])
+def factor_update_tilde(factor, xs, Bs, ks, h_fn, w):
+    h = h_fn(xs, Bs, ks)  # <== 传入常量
+    J = jax.jacrev(h_fn, argnums=0)(xs, Bs, ks).reshape(h.size, xs.size)  # 只对 xs 求导
+
+
+    z = factor.z
+    z_Lam = factor.z_Lam
+
+    r = z - h.reshape(-1)
+    s = w(r.T @ z_Lam @ r, factor.threshold)
+    Lam = s * J.T @ z_Lam @ J
+    eta = s * J.T @ z_Lam @ (J @ xs.reshape(-1) + r)
+    return Gaussian(eta, Lam)
+
+
+@partial(jax.jit, static_argnames=["h_fn", "w"])
+def update_factor_tilde(facs, varis, vtof_msgs, linpoints, Bs, ks, h_fn, w):
+    vtof_msgs_reordered = jax.tree_util.tree_map(
+        lambda x: x[facs.adj_var_id, facs.adj_var_idx], vtof_msgs
+    )
+    linpoints_reordered = jax.tree_util.tree_map(
+        lambda x: x[facs.adj_var_id], linpoints
+    )
+
+    Bs_reordered = jax.tree_util.tree_map(
+        lambda x: x[facs.adj_var_id], Bs
+    )
+
+    ks_reordered = jax.tree_util.tree_map(
+        lambda x: x[facs.adj_var_id], ks
+    )
+
+    # If shape is (N, 1, D), squeeze to (N, D)
+    if linpoints_reordered.ndim == 3 and linpoints_reordered.shape[1] == 1:
+        linpoints_reordered = linpoints_reordered.squeeze(1)
+        Bs_reordered = Bs_reordered.squeeze(1)
+        ks_reordered = ks_reordered.squeeze(1)
+    
+
+    facs.potential = jax.vmap(
+        factor_update_tilde, in_axes=(0, 0, 0, 0, None, None)  # constant vmap in 0-th axis
+    )(facs, linpoints_reordered, Bs_reordered, ks_reordered, h_fn, w)
+
+    ftov_msgs = jax.vmap(compute_ftov_msg)(facs, vtof_msgs_reordered)
+
+    varis.msgs.eta = varis.msgs.eta.at[facs.adj_var_id, facs.adj_var_idx].set(ftov_msgs.eta)
+    varis.msgs.Lam = varis.msgs.Lam.at[facs.adj_var_id, facs.adj_var_idx].set(ftov_msgs.Lam)
+
+    mask = (varis.adj_factor_idx >= 0)[..., None]
+    varis.msgs.eta = varis.msgs.eta * mask
+    varis.msgs.Lam = varis.msgs.Lam * mask[..., None]
+
+    return facs, varis
+
+
