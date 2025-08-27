@@ -251,10 +251,12 @@ def update_factor(facs, varis, vtof_msgs, linpoints, f, w): # f is factor functi
     return facs, varis
 
 
+
 @jax.jit
 def huber(e, t):
     x = jnp.sqrt(e)
     return jnp.where(x <= t, 1.0, t / x)
+
 
 
 @jax.jit

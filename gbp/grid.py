@@ -515,7 +515,6 @@ def build_abs_slam_graph(
         eigvecs = eigvecs[:, idx]            # Reorder corresponding eigenvectors
 
         # Step 3: Select the top-k eigenvectors to form the projection matrix (principal subspace)
-        r = r
         B_reduced = eigvecs[:, :r]                 # B_reduced: shape (8, r), projects 8D to rD
 
         Bs.append(B_reduced)                        # Store the projection matrix for this variable
