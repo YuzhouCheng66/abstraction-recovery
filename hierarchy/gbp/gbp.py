@@ -153,6 +153,7 @@ class FactorGraph:
                 else:
                     var.update_belief()
 
+
     def update_all_residuals(self, vars=None, level=None, smoothing=False):
         if vars is None:
             vars = self.var_nodes[:self.n_var_nodes]
@@ -820,6 +821,7 @@ class Factor:
         else:
             J = self.jac_fn(self.linpoint, *self.args)
             pred_measurement = self.meas_fn(self.linpoint, *self.args)
+
         if isinstance(self.measurement, float):
             meas_model_lambda = 1 / self.adaptive_gauss_noise_var
             lambda_factor = meas_model_lambda * np.outer(J, J)
