@@ -890,6 +890,7 @@ class Factor:
         """
             Compute all outgoing messages from the factor.
         """
+
         if self.type[0:5] == "multi":
             eta_damping = eta_damping
         messages_eta, messages_lam = [], []
@@ -926,10 +927,14 @@ class Factor:
             #                   [lam_factor[start_dim + mess_dofs:, :start_dim], lam_factor[start_dim + mess_dofs:, start_dim + mess_dofs:]]])
 
             # Compute outgoing messages
-            new_message_lam = loo - lono @ np.linalg.inv(lnono) @ lnoo
+
+            lnono_inv = np.linalg.inv(lnono)
+
+            new_message_lam = loo - lono @ lnono_inv @ lnoo
             messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
-            new_message_eta = eo - lono @ np.linalg.inv(lnono) @ eno
+            new_message_eta = eo - lono @ lnono_inv @ eno
             messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
+
             start_dim += self.adj_var_nodes[v].dofs
 
         
