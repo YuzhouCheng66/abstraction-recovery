@@ -889,12 +889,24 @@ class Factor:
     def compute_messages(self, eta_damping):
         """
             Compute all outgoing messages from the factor.
+            This is specialised for one and two variable factors.
         """
 
+        if len(self.adj_vIDs) == 1:
+            v = 0
+            if self.b_calc_mess_dist:
+                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
+            self.messages[v].eta = self.factor.eta.copy()
+            self.messages[v].lam = self.factor.lam.copy()
+            return
+        
+        
         if self.type[0:5] == "multi":
             eta_damping = eta_damping
         messages_eta, messages_lam = [], []
         start_dim = 0
+
+
         for v in range(len(self.adj_vIDs)):
             eta_factor, lam_factor = self.factor.eta.copy(), self.factor.lam.copy()
 
@@ -946,6 +958,7 @@ class Factor:
             self.messages[v].eta = messages_eta[v]
 
         #time.sleep(0.00000001)
+
 
     def smoothing_compute_messages(self, eta_damping):
 

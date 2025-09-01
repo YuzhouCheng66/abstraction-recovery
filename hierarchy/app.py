@@ -13,7 +13,7 @@ app.title = "Factor Graph SVD Abs&Recovery"
 # -----------------------
 # SLAM-like base graph
 # -----------------------
-def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50):
+def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None,):
     nodes, edges = [], []
     positions = []
     x, y = 0.0, 0.0
@@ -37,6 +37,26 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50):
                 xi, yi = positions[i]; xj, yj = positions[j]
                 if np.hypot(xi-xj, yi-yj) < float(loop_radius):
                     edges.append({"data": {"source": f"b{i}", "target": f"b{j}"}})
+
+    # 确定强先验的节点集合
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if prior_prop <= 0.0:
+        strong_ids = {0}
+    elif prior_prop >= 1.0:
+        strong_ids = set(range(N))
+    else:
+        k = max(1, int(np.floor(prior_prop * N)))
+        strong_ids = set(rng.choice(N, size=k, replace=False).tolist())
+
+    # 给 strong prior 节点加 edge
+    for i in strong_ids:
+        edges.append({
+            "data": {"source": f"b{i}", "target": "prior"}
+        })
+
+
     return nodes, edges
 
 # -----------------------
@@ -72,13 +92,27 @@ def fuse_to_super_grid(prev_nodes, prev_edges, gx, gy, layer_idx):
     super_edges, seen = [], set()
     for e in prev_edges:
         u, v = e["data"]["source"], e["data"]["target"]
-        su, sv = node_map[u], node_map[v]
-        if su != sv:
-            eid = tuple(sorted((su, sv)))
+
+        if v != "prior":
+            su, sv = node_map[u], node_map[v]
+            if su != sv:
+                eid = tuple(sorted((su, sv)))
+                if eid not in seen:
+                    super_edges.append({"data": {"source": su, "target": sv}})
+                    seen.add(eid)
+            elif su == sv:
+                eid = tuple(sorted((su, "prior")))
+                if eid not in seen:
+                    super_edges.append({"data": {"source": su, "target": "prior"}})
+                    seen.add(eid)
+
+        elif v == "prior":
+            eid = tuple(sorted((su, v)))
             if eid not in seen:
-                super_edges.append({"data": {"source": su, "target": sv}})
+                super_edges.append({"data": {"source": su, "target": "prior"}})
                 seen.add(eid)
-    return super_nodes, super_edges
+
+    return super_nodes, super_edges, node_map
 
 # -----------------------
 # K-Means 聚合
@@ -143,13 +177,26 @@ def fuse_to_super_knn(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol=1e
     super_edges, seen = [], set()
     for e in prev_edges:
         u, v = e["data"]["source"], e["data"]["target"]
-        su, sv = node_map[u], node_map[v]
-        if su != sv:
-            key = tuple(sorted((su, sv)))
-            if key not in seen:
-                super_edges.append({"data": {"source": su, "target": sv}})
-                seen.add(key)
-    return super_nodes, super_edges
+        if v != "prior":
+            su, sv = node_map[u], node_map[v]
+            if su != sv:
+                eid = tuple(sorted((su, sv)))
+                if eid not in seen:
+                    super_edges.append({"data": {"source": su, "target": sv}})
+                    seen.add(eid)
+            elif su == sv:
+                eid = tuple(sorted((su, su)))
+                if eid not in seen:
+                    super_edges.append({"data": {"source": su, "target": "prior"}})
+                    seen.add(eid)
+
+        elif v == "prior":
+            eid = tuple(sorted((su, su)))
+            if eid not in seen:
+                super_edges.append({"data": {"source": su, "target": "prior"}})
+                seen.add(eid)
+
+    return super_nodes, super_edges, node_map
 
 def copy_to_abs(super_nodes, super_edges, layer_idx):
     abs_nodes = []
@@ -185,8 +232,8 @@ def highest_pair_idx(names):
 # -----------------------
 # 初始化 & 边界
 # -----------------------
-def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50):
-    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius)
+def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0):
+    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop)
     return [{"name": "base", "nodes": base_nodes, "edges": base_edges}]
 
 VIEW_W, VIEW_H = 960, 600
@@ -224,15 +271,16 @@ gbp_graph = None
 # -----------------------
 # GBP Graph 构建
 # -----------------------
+
 def build_noisy_pose_graph(
     nodes,
     edges,
-    prior_sigma: float = 1.0,
-    odom_sigma: float = 1.0,
-    prior_prop: float = 0.0,
-    tiny_prior: float = 1e-6,
-    seed: int = 0,
+    prior_sigma: float = 10,
+    odom_sigma: float = 10,
+    tiny_prior: float = 1e-10,
+    rng=None,
 ):
+    
     """
     构造二维 pose-only 因子图（线性，高斯），并注入噪声。
     参数:
@@ -242,85 +290,128 @@ def build_noisy_pose_graph(
       tiny_prior  : 所有节点默认加的极小先验，防止奇异
       seed        : 随机种子（可复现）
     """
-    rng = np.random.default_rng(seed)
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0.1)
 
-    # ---- 变量节点 + 先验 ----
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+
     var_nodes = []
     I2 = np.eye(2, dtype=float)
     N = len(nodes)
 
-    # 确定强先验的节点集合
-    if prior_prop <= 0.0:
-        strong_ids = {0}
-    elif prior_prop >= 1.0:
-        strong_ids = set(range(N))
-    else:
-        k = max(1, int(np.floor(prior_prop * N)))
-        strong_ids = set(rng.choice(N, size=k, replace=False).tolist())
+    # ---- 预生成噪声 ----
+    prior_noises = {}
+    odom_noises = {}
+    strong_ids = set()
 
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # 为所有边生成噪声
+    for e in edges:
+        src = e["data"]["source"]; dst = e["data"]["target"]
+        # 二元边
+        if src.startswith("b") and dst.startswith("b"):
+            odom_noises[(int(src[1:]), int(dst[1:]))] = rng.normal(0.0, odom_sigma, size=2)
+        # 一元边（强先验）
+        elif dst == "prior":
+            prior_noises[int(src[1:])] = rng.normal(0.0, prior_sigma, size=2)
+
+
+    # ---- variable nodes ----
     for i, n in enumerate(nodes):
         v = VariableNode(i, dofs=2)
-        # 保存 GT（只用于生成测量 & 初始线性化点）
         v.GT = np.array([n["position"]["x"], n["position"]["y"]], dtype=float)
 
-        # 极小先验（所有节点都有，避免奇异）
+        # 极小先验
         v.prior.lam = tiny_prior * I2
         v.prior.eta = np.zeros(2, dtype=float)
-
-        # 强先验（根据 prior_prop 选择）
-        if i in strong_ids:
-            lam_strong = I2 / (prior_sigma ** 2)
-            eta_strong = lam_strong @ (v.GT + rng.normal(0.0, prior_sigma, size=2))
-            v.prior.lam = v.prior.lam + lam_strong
-            v.prior.eta = v.prior.eta + eta_strong
 
         var_nodes.append(v)
 
     fg.var_nodes = var_nodes
     fg.n_var_nodes = len(var_nodes)
 
-    # ---- 测量模型（线性的）----
-    def meas_fn(xy, *args):
-        # measurement = p_j - p_i
-        xy = np.asarray(xy, dtype=float)
-        return xy[2:] - xy[:2]
 
+    # ---- prior factors ----
+    def meas_fn_unary(x, *args):
+        return x
+    def jac_fn_unary(x, *args):
+        return np.eye(2)
+    # ---- odometry factors ----
+    def meas_fn(xy, *args):
+        return xy[2:] - xy[:2]
     def jac_fn(xy, *args):
-        # d(pj - pi)/d[pi,pj] = [-I, I]
         return np.array([[-1, 0, 1, 0],
                          [ 0,-1, 0, 1]], dtype=float)
-
-    # ---- 里程计/回环 因子 ----
+    
     factors = []
     fid = 0
+
     for e in edges:
         src = e["data"]["source"]; dst = e["data"]["target"]
-        # 只连 base 层的节点（id 形如 "b123"）
-        if not (src.startswith("b") and dst.startswith("b")):
-            continue
-        i = int(src[1:]); j = int(dst[1:])
-        vi, vj = var_nodes[i], var_nodes[j]
+        if src.startswith("b") and dst.startswith("b"):
+            i, j = int(src[1:]), int(dst[1:])
+            vi, vj = var_nodes[i], var_nodes[j]
 
-        # 测量 = GT 差值 + 高斯噪声
-        meas = (vj.GT - vi.GT) + rng.normal(0.0, odom_sigma, size=2)
+            meas = (vj.GT - vi.GT) + odom_noises[(i, j)]
 
-        f = Factor(fid, [vi, vj], meas, odom_sigma, meas_fn, jac_fn)
-        f.type = "base"  # 防止 compute_messages 中访问 self.type 报错
+            f = Factor(fid, [vi, vj], meas, odom_sigma, meas_fn, jac_fn)
+            f.type = "base"
+            linpoint = np.r_[vi.GT, vj.GT]
+            f.compute_factor(linpoint=linpoint, update_self=True)
 
-        # 用 GT 作为初始线性化点，避免前几步用未稳定的 belief
-        linpoint = np.r_[vi.GT, vj.GT]
-        f.compute_factor(linpoint=linpoint, update_self=True)
+            factors.append(f)
+            vi.adj_factors.append(f)
+            vj.adj_factors.append(f)
+            fid += 1
 
-        factors.append(f)
-        vi.adj_factors.append(f)
-        vj.adj_factors.append(f)
-        fid += 1
+        else:
+            i = int(src[1:])
+            vi = var_nodes[i]
+            z = vi.GT + prior_noises[i]
+
+            f = Factor(fid, [vi], z, prior_sigma, meas_fn_unary, jac_fn_unary)
+            f.type = "prior"
+            f.compute_factor(linpoint=z, update_self=True)
+
+            factors.append(f)
+            vi.adj_factors.append(f)
+            fid += 1
 
     fg.factors = factors
     fg.n_factor_nodes = len(factors)
     return fg
 
+
+
+def build_super_graph():
+    pass
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def build_abs_graph():
+    pass    
 
 
 # -----------------------
@@ -345,7 +436,12 @@ app.layout = html.Div([
 
             html.Span("loop radius:", style={"marginRight":"6px"}),
             dcc.Input(id="param-radius", type="number", value=50, step=1,
+                      style={"width":"100px", "marginRight":"12px"}),
+
+            html.Span("prior prop:", style={"marginRight":"6px"}),
+            dcc.Input(id="prior-prop", type="number", value=0, step=0.01, min=0, max=1,
                       style={"width":"100px"})
+
         ], style={"flex":"1"}),
 
         html.Div([
@@ -390,10 +486,6 @@ app.layout = html.Div([
 
             html.Span("odom σ:", style={"marginRight":"6px"}),
             dcc.Input(id="odom-noise", type="number", value=1.0, step=0.1,
-                      style={"width":"100px", "marginRight":"12px"}),
-
-            html.Span("prior prop:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-prop", type="number", value=0, step=0.01, min=0, max=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("iters:", style={"marginRight":"6px"}),
@@ -467,14 +559,15 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
         radius = float(pRadius or 50)
-        layers = init_layers(N, step, prob, radius)
+        prior_prop=float(pPriorProp or 0.0)
+        layers = init_layers(N, step, prob, radius, prior_prop)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
         # 构建 GBP 图（此时渲染仍显示 GT）
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
-                                           odom_sigma=float(pOdom or 1.0),
-                                           prior_prop=float(pPriorProp or 0.0))
+                                           odom_sigma=float(pOdom or 1.0)
+                                           )
         opts=[{"label":"base","value":"base"}]
         return opts, "base"
 
@@ -492,10 +585,12 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             k_next = pair_idx + 1
             super_layer_idx = k_next*2 - 1
             if mode == "grid":
-                super_nodes, super_edges = fuse_to_super_grid(last["nodes"], last["edges"], int(gx or 2), int(gy or 2), super_layer_idx)
+                super_nodes, super_edges, node_map = fuse_to_super_grid(last["nodes"], last["edges"], int(gx or 2), int(gy or 2), super_layer_idx)
             else:
-                super_nodes, super_edges = fuse_to_super_knn(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
-            layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges})
+                super_nodes, super_edges, node_map = fuse_to_super_knn(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
+            layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
+            layers[super_layer_idx]["graph"] = build_super_graph()
+            
             pair_idx = k_next
 
     opts=[{"label":L["name"],"value":L["name"]} for L in layers]
@@ -515,6 +610,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 def update_layer(layer_name, _options, gbp_poses):
     layer = next(l for l in layers if l["name"] == layer_name)
     nodes, edges = layer["nodes"], layer["edges"]
+    edges = [e for e in edges if e["data"].get("target") != "prior"]
 
     # 如果是 base 层，并且有 GBP 结果，覆盖坐标
     if layer_name == "base" and gbp_poses:
@@ -603,7 +699,7 @@ def gbp_unified(run_clicks, interval_ticks, new_graph_clicks, state, iters, snap
         return None, "Ready. New graph created and previous solver stopped.", reset_state, True, 0
 
     # 2) 点按钮：初始化并启动 interval
-    if trig.startswith("gbp-run"):
+    if trig.startswith("gbp-run"):                                         
         if gbp_graph is None:
             return no_update, "No factor graph yet. Click New Graph first.", no_update, True, no_update
         iters = int(iters or 50)
