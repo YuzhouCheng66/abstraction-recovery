@@ -26,17 +26,17 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
         positions.append((x, y))
     for i, (px, py) in enumerate(positions):
         nodes.append({
-            "data": {"id": f"b{i}", "layer": 0, "dim": 2},
+            "data": {"id": f"{i}", "layer": 0, "dim": 2},
             "position": {"x": float(px), "y": float(py)}
         })
     for i in range(int(N) - 1):
-        edges.append({"data": {"source": f"b{i}", "target": f"b{i+1}"}})
+        edges.append({"data": {"source": f"{i}", "target": f"{i+1}"}})
     for i in range(int(N)):
         for j in range(i + 5, int(N)):
             if np.random.rand() < float(loop_prob):
                 xi, yi = positions[i]; xj, yj = positions[j]
                 if np.hypot(xi-xj, yi-yj) < float(loop_radius):
-                    edges.append({"data": {"source": f"b{i}", "target": f"b{j}"}})
+                    edges.append({"data": {"source": f"{i}", "target": f"{j}"}})
 
     # 确定强先验的节点集合
     if rng is None:
@@ -53,7 +53,7 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
     # 给 strong prior 节点加 edge
     for i in strong_ids:
         edges.append({
-            "data": {"source": f"b{i}", "target": "prior"}
+            "data": {"source": f"{i}", "target": "prior"}
         })
 
 
@@ -300,6 +300,121 @@ def build_noisy_pose_graph(
     # ---- 预生成噪声 ----
     prior_noises = {}
     odom_noises = {}
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # 为所有边生成噪声
+    for e in edges:
+        src = e["data"]["source"]; dst = e["data"]["target"]
+        # 二元边
+        if dst != "prior":
+            odom_noises[(int(src[:]), int(dst[:]))] = rng.normal(0.0, odom_sigma, size=2)
+        # 一元边（强先验）
+        elif dst == "prior":
+            prior_noises[int(src[:])] = rng.normal(0.0, prior_sigma, size=2)
+
+
+    # ---- variable nodes ----
+    for i, n in enumerate(nodes):
+        v = VariableNode(i, dofs=2)
+        v.GT = np.array([n["position"]["x"], n["position"]["y"]], dtype=float)
+
+        # 极小先验
+        v.prior.lam = tiny_prior * I2
+        v.prior.eta = np.zeros(2, dtype=float)
+
+        var_nodes.append(v)
+
+    fg.var_nodes = var_nodes
+    fg.n_var_nodes = len(var_nodes)
+
+
+    # ---- prior factors ----
+    def meas_fn_unary(x, *args):
+        return x
+    def jac_fn_unary(x, *args):
+        return np.eye(2)
+    # ---- odometry factors ----
+    def meas_fn(xy, *args):
+        return xy[2:] - xy[:2]
+    def jac_fn(xy, *args):
+        return np.array([[-1, 0, 1, 0],
+                         [ 0,-1, 0, 1]], dtype=float)
+    
+    factors = []
+    fid = 0
+
+    for e in edges:
+        src = e["data"]["source"]; dst = e["data"]["target"]
+        if dst != "prior":
+            i, j = int(src[:]), int(dst[:])
+            vi, vj = var_nodes[i], var_nodes[j]
+
+            meas = (vj.GT - vi.GT) + odom_noises[(i, j)]
+
+            f = Factor(fid, [vi, vj], meas, odom_sigma, meas_fn, jac_fn)
+            f.type = "base"
+            linpoint = np.r_[vi.GT, vj.GT]
+            f.compute_factor(linpoint=linpoint, update_self=True)
+
+            factors.append(f)
+            vi.adj_factors.append(f)
+            vj.adj_factors.append(f)
+            fid += 1
+
+        else:
+            i = int(src[:])
+            vi = var_nodes[i]
+            z = vi.GT + prior_noises[i]
+
+            f = Factor(fid, [vi], z, prior_sigma, meas_fn_unary, jac_fn_unary)
+            f.type = "prior"
+            f.compute_factor(linpoint=z, update_self=True)
+
+            factors.append(f)
+            vi.adj_factors.append(f)
+            fid += 1
+
+    fg.factors = factors
+    fg.n_factor_nodes = len(factors)
+    return fg
+
+
+
+def build_super_graph(layers):
+    # last layer must be base or abs
+    base_graph = layers[-2]["graph"] 
+    base_nodes = layers[-2]["nodes"]
+    base_edges = layers[-2]["edges"]
+
+    # current layer is super
+    super_nodes = layers[-1]["nodes"]
+    super_edges = layers[-1]["edges"]   
+    node_map = layers[-1]["node_map"]
+
+    edge_index = {(e["data"]["source"], e["data"]["target"]): e for e in super_edges}
+
+
+    
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+
+    for base_edge in base_edges:
+        u, v = base_edge["data"]["source"], base_edge["data"]["target"]
+        if v != "prior":
+            su, sv = node_map[u], node_map[v]
+
+
+    vi.adj_factors.append(f)
+    
+    """
+    var_nodes = []
+    I2 = np.eye(2, dtype=float)
+    N = len(nodes)
+
+    # ---- 预生成噪声 ----
+    prior_noises = {}
+    odom_noises = {}
     strong_ids = set()
 
     if rng is None:
@@ -379,28 +494,8 @@ def build_noisy_pose_graph(
 
     fg.factors = factors
     fg.n_factor_nodes = len(factors)
+    """
     return fg
-
-
-
-def build_super_graph():
-    pass
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -568,6 +663,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                                            prior_sigma=float(pPrior or 1.0),
                                            odom_sigma=float(pOdom or 1.0)
                                            )
+        layers[0]["graph"] = gbp_graph
         opts=[{"label":"base","value":"base"}]
         return opts, "base"
 
@@ -589,8 +685,8 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             else:
                 super_nodes, super_edges, node_map = fuse_to_super_knn(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
-            layers[super_layer_idx]["graph"] = build_super_graph()
-            
+            layers[super_layer_idx]["graph"] = build_super_graph(layers)
+
             pair_idx = k_next
 
     opts=[{"label":L["name"],"value":L["name"]} for L in layers]
