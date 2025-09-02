@@ -75,44 +75,14 @@ class FactorGraph:
     
     def energy_map(self, include_priors: bool = True, include_factors: bool = True) -> float:
         """
-        χ² 能量：观测因子 + 先验因子。
-        - 观测：r = h(x) - z，E = 0.5 * r^T (σ^-2 I) r
-        - 先验：r = x - μ0,  μ0 = Λ^-1 η，E = 0.5 * r^T Λ r
-        不依赖 var.residual，随时可调用。
+        实际上是距离平方和
         """
         total = 0.0
 
-        if include_factors:
-            for f in self.factors[:self.n_factor_nodes]:
-                # 拼接相邻变量的当前均值作为测量函数输入
-                try:
-                    xy = np.concatenate([v.mu for v in f.adj_var_nodes])
-                except Exception:
-                    # 理论上不会进来；仅兜底
-                    continue
-
-                pred = f.meas_fn(xy, *f.args)
-                r = np.asarray(pred, dtype=float) - np.asarray(f.measurement, dtype=float)
-
-                # 噪声协方差为 σ^2 I => 信息权重 W = (1/σ^2) I
-                W_scalar = 1.0 / float(f.gauss_noise_var)
-                total += 0.5 * float(r.T @ (W_scalar * r))
-
-        if include_priors:
-            for v in self.var_nodes[:self.n_var_nodes]:
-                lam = np.asarray(v.prior.lam, dtype=float)
-                eta = np.asarray(v.prior.eta, dtype=float)
-                if lam.size == 0:
-                    continue
-
-                # μ0 = Λ^-1 η（若数值奇异，用 pinv）
-                try:
-                    mu0 = np.linalg.solve(lam, eta)
-                except np.linalg.LinAlgError:
-                    mu0 = np.linalg.pinv(lam) @ eta
-
-                r = np.asarray(v.mu, dtype=float) - mu0
-                total += 0.5 * float(r.T @ lam @ r)
+        for v in self.var_nodes[:self.n_var_nodes]:
+            gt = np.asarray(v.GT, dtype=float)
+            r = np.asarray(v.mu, dtype=float) - gt
+            total += 0.5 * float(r.T @ r)
 
         return total
 
@@ -726,6 +696,8 @@ class Factor:
         """
 
         self.factorID = factor_id
+
+        self.gauss_noise_std = gauss_noise_std
 
         self.dofs_conditional_vars = 0
         self.adj_var_nodes = adj_var_nodes

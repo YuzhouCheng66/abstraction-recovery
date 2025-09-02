@@ -385,7 +385,7 @@ def build_noisy_pose_graph(
 def build_super_graph(layers):
     """
     从 layers[-2] (base/abs) 和 layers[-1] (super) 构建 super factor graph.
-    线性高斯场景: factor 的 meas_fn/jac_fn 在初始化时一次性 compute, 就不再更新。
+    线性高斯场景: factor 的 meas_fn/jac_fn 在初始化时一次性 compute,就不再更新。
     """
     # 上一层（base/abs）
     base_graph = layers[-2]["graph"]
