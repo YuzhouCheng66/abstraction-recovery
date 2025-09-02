@@ -383,121 +383,123 @@ def build_noisy_pose_graph(
 
 
 def build_super_graph(layers):
-    # last layer must be base or abs
-    base_graph = layers[-2]["graph"] 
+    """
+    从 layers[-2] (base/abs) 和 layers[-1] (super) 构建 super factor graph.
+    线性高斯场景: factor 的 meas_fn/jac_fn 在初始化时一次性 compute, 就不再更新。
+    """
+    # 上一层（base/abs）
+    base_graph = layers[-2]["graph"]
     base_nodes = layers[-2]["nodes"]
     base_edges = layers[-2]["edges"]
 
-    # current layer is super
+    # 当前 super 层
     super_nodes = layers[-1]["nodes"]
-    super_edges = layers[-1]["edges"]   
+    super_edges = layers[-1]["edges"]
     node_map = layers[-1]["node_map"]
 
-    edge_index = {(e["data"]["source"], e["data"]["target"]): e for e in super_edges}
-
-
-    
+    # 初始化 super graph
     fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
 
-    for base_edge in base_edges:
-        u, v = base_edge["data"]["source"], base_edge["data"]["target"]
-        if v != "prior":
-            su, sv = node_map[u], node_map[v]
+    # === Step1: 创建 super variable nodes ===
+    super_var_nodes = {}
+    for sn in super_nodes:
+        sid = sn["data"]["id"]
+        dim = sn["data"]["dim"]
+        v = VariableNode(sid, dofs=dim)
+        super_var_nodes[sid] = v
+    fg.var_nodes = list(super_var_nodes.values())
+    fg.n_var_nodes = len(fg.var_nodes)
 
+    # === Step2: 构造 super priors (由组内 base priors + 组内 between 合并) ===
+    def meas_fn_super_prior(x_super, group_info):
+        """ x_super: 叠加的 base variables，group_info 保存 base priors 和内部 between """
+        out = []
+        # 原 base priors
+        for (local_idx, z) in group_info["priors"]:
+            out.append(x_super[2*local_idx:2*local_idx+2] - z)
+        # 组内 between
+        for (i, j, meas) in group_info["betweens"]:
+            pi = x_super[2*i:2*i+2]
+            pj = x_super[2*j:2*j+2]
+            out.append((pj - pi) - meas)
+        return np.concatenate(out)
 
-    vi.adj_factors.append(f)
-    
-    """
-    var_nodes = []
-    I2 = np.eye(2, dtype=float)
-    N = len(nodes)
+    def jac_fn_super_prior(x_super, group_info):
+        dim = x_super.shape[0]
+        J = []
+        for (local_idx, _) in group_info["priors"]:
+            row = np.zeros((2, dim))
+            row[:, 2*local_idx:2*local_idx+2] = np.eye(2)
+            J.append(row)
+        for (i, j, meas) in group_info["betweens"]:
+            row = np.zeros((2, dim))
+            row[:, 2*i:2*i+2] = -np.eye(2)
+            row[:, 2*j:2*j+2] =  np.eye(2)
+            J.append(row)
+        return np.vstack(J)
 
-    # ---- 预生成噪声 ----
-    prior_noises = {}
-    odom_noises = {}
-    strong_ids = set()
-
-    if rng is None:
-        rng = np.random.default_rng()
-
-    # 为所有边生成噪声
-    for e in edges:
-        src = e["data"]["source"]; dst = e["data"]["target"]
-        # 二元边
-        if src.startswith("b") and dst.startswith("b"):
-            odom_noises[(int(src[1:]), int(dst[1:]))] = rng.normal(0.0, odom_sigma, size=2)
-        # 一元边（强先验）
-        elif dst == "prior":
-            prior_noises[int(src[1:])] = rng.normal(0.0, prior_sigma, size=2)
-
-
-    # ---- variable nodes ----
-    for i, n in enumerate(nodes):
-        v = VariableNode(i, dofs=2)
-        v.GT = np.array([n["position"]["x"], n["position"]["y"]], dtype=float)
-
-        # 极小先验
-        v.prior.lam = tiny_prior * I2
-        v.prior.eta = np.zeros(2, dtype=float)
-
-        var_nodes.append(v)
-
-    fg.var_nodes = var_nodes
-    fg.n_var_nodes = len(var_nodes)
-
-
-    # ---- prior factors ----
-    def meas_fn_unary(x, *args):
-        return x
-    def jac_fn_unary(x, *args):
-        return np.eye(2)
-    # ---- odometry factors ----
-    def meas_fn(xy, *args):
-        return xy[2:] - xy[:2]
-    def jac_fn(xy, *args):
-        return np.array([[-1, 0, 1, 0],
-                         [ 0,-1, 0, 1]], dtype=float)
-    
-    factors = []
+    # 遍历每个 super node，收集 group 内的 base factors
+    super_factors = []
     fid = 0
+    for sid, sv in super_var_nodes.items():
+        group_info = {"priors": [], "betweens": []}
+        # 找到该 super node 下的 base nodes
+        child_ids = [bid for bid, parent in node_map.items() if parent == sid]
+        for bid in child_ids:
+            bi = int(bid[1:])  # b0, b1 → 0,1
+            # base prior
+            for f in base_graph.var_nodes[bi].adj_factors:
+                if f.type == "prior":
+                    group_info["priors"].append((child_ids.index(bid), f.z))
+            # base between
+            for f in base_graph.var_nodes[bi].adj_factors:
+                if f.type == "base":
+                    (vi, vj) = f.vars
+                    if all(v.name in child_ids for v in [vi, vj]):
+                        i_local = child_ids.index(vi.name)
+                        j_local = child_ids.index(vj.name)
+                        group_info["betweens"].append((i_local, j_local, f.z))
+        if group_info["priors"] or group_info["betweens"]:
+            f = Factor(fid, [sv], None, 1.0, meas_fn_super_prior, jac_fn_super_prior)
+            f.type = "super_prior"
+            linpoint = np.zeros(sv.dofs)
+            f.compute_factor(linpoint=linpoint, update_self=True, args=(group_info,))
+            super_factors.append(f)
+            sv.adj_factors.append(f)
+            fid += 1
 
-    for e in edges:
-        src = e["data"]["source"]; dst = e["data"]["target"]
-        if src.startswith("b") and dst.startswith("b"):
-            i, j = int(src[1:]), int(dst[1:])
-            vi, vj = var_nodes[i], var_nodes[j]
+    # === Step3: 构造 super between factors (跨组 base edges) ===
+    def meas_fn_super_between(x_concat, meas):
+        return x_concat[sv.dofs:] - x_concat[:sv.dofs] - meas
 
-            meas = (vj.GT - vi.GT) + odom_noises[(i, j)]
+    def jac_fn_super_between(x_concat, meas):
+        d = x_concat.shape[0] // 2
+        J = np.zeros((2, 2*d))
+        J[:, :d] = -np.eye(2)
+        J[:, d:] =  np.eye(2)
+        return J
 
-            f = Factor(fid, [vi, vj], meas, odom_sigma, meas_fn, jac_fn)
-            f.type = "base"
-            linpoint = np.r_[vi.GT, vj.GT]
-            f.compute_factor(linpoint=linpoint, update_self=True)
-
-            factors.append(f)
+    for e in base_edges:
+        u, v = e["data"]["source"], e["data"]["target"]
+        if v == "prior":
+            continue
+        su, sv = node_map[u], node_map[v]
+        if su != sv:  # 跨组 edge
+            vi, vj = super_var_nodes[su], super_var_nodes[sv]
+            meas = np.array([0.0, 0.0])  # 先用 0 代替，后续可以取 base edge 的测量平均
+            f = Factor(fid, [vi, vj], meas, 1.0, meas_fn_super_between, jac_fn_super_between)
+            f.type = "super_between"
+            linpoint = np.zeros(vi.dofs + vj.dofs)
+            f.compute_factor(linpoint=linpoint, update_self=True, args=(meas,))
+            super_factors.append(f)
             vi.adj_factors.append(f)
             vj.adj_factors.append(f)
             fid += 1
 
-        else:
-            i = int(src[1:])
-            vi = var_nodes[i]
-            z = vi.GT + prior_noises[i]
+    fg.factors = super_factors
+    fg.n_factor_nodes = len(super_factors)
 
-            f = Factor(fid, [vi], z, prior_sigma, meas_fn_unary, jac_fn_unary)
-            f.type = "prior"
-            f.compute_factor(linpoint=z, update_self=True)
-
-            factors.append(f)
-            vi.adj_factors.append(f)
-            fid += 1
-
-    fg.factors = factors
-    fg.n_factor_nodes = len(factors)
-    """
     return fg
-
-
 
 
 
