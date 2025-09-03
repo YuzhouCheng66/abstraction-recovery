@@ -608,8 +608,8 @@ class VariableNode:
 
         self.belief.eta = eta 
         self.belief.lam = lam
-        self.Sigma = 1/np.diagonal(self.belief.lam)
-        self.mu = self.Sigma * self.belief.eta
+
+        self.mu = np.linalg.solve(self.belief.lam, self.belief.eta)
         
         # Send belief to adjacent factors
         for factor in self.adj_factors:
@@ -912,6 +912,7 @@ class Factor:
 
             # Compute outgoing messages
 
+            lnono += 1e-10 * np.eye(lnono.shape[0])
             lnono_inv = np.linalg.inv(lnono)
 
             new_message_lam = loo - lono @ lnono_inv @ lnoo
