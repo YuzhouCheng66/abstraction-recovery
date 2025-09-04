@@ -876,7 +876,6 @@ class Factor:
         if self.type[0:5] == "multi":
             eta_damping = eta_damping
         messages_eta, messages_lam = [], []
-        start_dim = 0
 
 
         for v in range(len(self.adj_vIDs)):
@@ -892,27 +891,25 @@ class Factor:
                 mess_start_dim += self.adj_var_nodes[var].dofs
 
             # Divide up parameters of distribution
-            var_side = 1+v*-2
-            mess_dofs = self.adj_var_nodes[v].dofs
-            adj_var_start_dim = var_side * start_dim + mess_dofs
+            divide =  self.adj_var_nodes[0].dofs
+            if v == 0:
+                eo = eta_factor[:divide]
+                eno = eta_factor[divide:]
 
-            eo = eta_factor[start_dim:start_dim + mess_dofs]
-            eno = eta_factor[adj_var_start_dim: adj_var_start_dim + mess_dofs]
+                loo = lam_factor[:divide, :divide]
+                lono = lam_factor[:divide, divide:]
+                lnoo = lam_factor[divide:, :divide]
+                lnono = lam_factor[divide:, divide:]
+            else:
+                eo = eta_factor[divide:]
+                eno = eta_factor[:divide]
 
-            loo = lam_factor[start_dim:start_dim + mess_dofs, start_dim:start_dim + mess_dofs]
-            lono = lam_factor[start_dim:start_dim + mess_dofs, adj_var_start_dim : adj_var_start_dim + mess_dofs]
-            lnoo = lam_factor[adj_var_start_dim:adj_var_start_dim + mess_dofs, start_dim:start_dim + mess_dofs]
-            lnono = lam_factor[adj_var_start_dim:adj_var_start_dim + mess_dofs, adj_var_start_dim:adj_var_start_dim + mess_dofs]
-            # lono = np.hstack((lam_factor[start_dim:start_dim + mess_dofs, :start_dim],
-            #                   lam_factor[start_dim:start_dim + mess_dofs, start_dim + mess_dofs:]))
-            # lnoo = np.vstack((lam_factor[:start_dim, start_dim:start_dim + mess_dofs],
-            #                   lam_factor[start_dim + mess_dofs:, start_dim:start_dim + mess_dofs]))
-            # lnono = np.block([[lam_factor[:start_dim, :start_dim], lam_factor[:start_dim, start_dim + mess_dofs:]],
-            #                   [lam_factor[start_dim + mess_dofs:, :start_dim], lam_factor[start_dim + mess_dofs:, start_dim + mess_dofs:]]])
+                loo = lam_factor[divide:, divide:]
+                lono = lam_factor[divide:, :divide]
+                lnoo = lam_factor[:divide, divide:]
+                lnono = lam_factor[:divide, :divide]
 
-            # Compute outgoing messages
-
-            lnono += 1e-10 * np.eye(lnono.shape[0])
+            lnono += 1e-12 * np.eye(lnono.shape[0])
             lnono_inv = np.linalg.inv(lnono)
 
             new_message_lam = loo - lono @ lnono_inv @ lnoo
@@ -920,9 +917,8 @@ class Factor:
             new_message_eta = eo - lono @ lnono_inv @ eno
             messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
 
-            start_dim += self.adj_var_nodes[v].dofs
 
-        
+            
         for v in range(len(self.adj_vIDs)):
             #self.messages_dist[v] = bhattacharyya(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
             if self.b_calc_mess_dist:
@@ -930,9 +926,10 @@ class Factor:
             self.messages[v].lam = messages_lam[v]
             self.messages[v].eta = messages_eta[v]
 
+
         #time.sleep(0.00000001)
 
-
+        
     def smoothing_compute_messages(self, eta_damping):
 
 
