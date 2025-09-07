@@ -684,7 +684,7 @@ class Factor:
                  factor_id,
                  adj_var_nodes,
                  measurement,
-                 gauss_noise_std,
+                 measurement_lambda,
                  meas_fn,
                  jac_fn,
                  loss=None,
@@ -696,8 +696,6 @@ class Factor:
         """
 
         self.factorID = factor_id
-
-        self.gauss_noise_std = gauss_noise_std
 
         self.dofs_conditional_vars = 0
         self.adj_var_nodes = adj_var_nodes
@@ -724,20 +722,17 @@ class Factor:
         self.factor = NdimGaussian(self.dofs_conditional_vars)
         self.linpoint = np.zeros(self.dofs_conditional_vars)  # linearisation point
 
-        self.measurement = measurement
-
         self.residual = None
-
         self.b_calc_mess_dist = wildfire
 
         # Measurement model
-        self.gauss_noise_var = gauss_noise_std**2
+        self.measurement = measurement
+        self.measurement_lambda = measurement_lambda
         self.meas_fn = meas_fn
         self.jac_fn = jac_fn
         self.args = args
 
         # Robust loss function
-        self.adaptive_gauss_noise_var = gauss_noise_std**2
         self.loss = loss
         self.mahalanobis_threshold = mahalanobis_threshold
         self.robust_flag = False
@@ -795,13 +790,11 @@ class Factor:
             pred_measurement = self.meas_fn(self.linpoint, *self.args)
 
         if isinstance(self.measurement, float):
-            meas_model_lambda = 1 / self.adaptive_gauss_noise_var
-            lambda_factor = meas_model_lambda * np.outer(J, J)
-            eta_factor = meas_model_lambda * J.T * (J @ self.linpoint + self.measurement - pred_measurement)
+            lambda_factor = self.measurement_lambda * np.outer(J, J)
+            eta_factor = self.measurement_lambda * J.T * (J @ self.linpoint + self.measurement - pred_measurement)
         else:
-            meas_model_lambda = np.eye(len(self.measurement)) / self.adaptive_gauss_noise_var
-            lambda_factor = J.T @ meas_model_lambda @ J
-            eta_factor = (J.T @ meas_model_lambda) @ (J @ self.linpoint + self.measurement - pred_measurement)
+            lambda_factor = J.T @ self.measurement_lambda @ J
+            eta_factor = (J.T @ self.measurement_lambda) @ (J @ self.linpoint + self.measurement - pred_measurement)
 
         if update_self:
             self.factor.eta, self.factor.lam = eta_factor, lambda_factor
@@ -900,7 +893,7 @@ class Factor:
                 lono = lam_factor[:divide, divide:]
                 lnoo = lam_factor[divide:, :divide]
                 lnono = lam_factor[divide:, divide:]
-            else:
+            elif v == 1:
                 eo = eta_factor[divide:]
                 eno = eta_factor[:divide]
 
@@ -930,6 +923,7 @@ class Factor:
         #time.sleep(0.00000001)
 
         
+
     def smoothing_compute_messages(self, eta_damping):
 
 
