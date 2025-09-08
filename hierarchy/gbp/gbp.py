@@ -609,7 +609,8 @@ class VariableNode:
         self.belief.eta = eta 
         self.belief.lam = lam
 
-        self.mu = np.linalg.solve(self.belief.lam, self.belief.eta)
+        self.Sigma = np.linalg.inv(self.belief.lam)
+        self.mu = self.Sigma @ self.belief.eta
         
         # Send belief to adjacent factors
         for factor in self.adj_factors:

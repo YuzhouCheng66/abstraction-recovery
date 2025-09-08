@@ -5,7 +5,7 @@ import dash_cytoscape as cyto
 import numpy as np
 
 # ==== GBP 引入 ====
-from gbp.gbp import FactorGraph, VariableNode, Factor
+from gbp.gbp import *
 
 app = dash.Dash(__name__)
 app.title = "Factor Graph SVD Abs&Recovery"
@@ -630,8 +630,135 @@ def build_super_graph(layers):
     return fg
 
 
-def build_abs_graph():
-    pass    
+def build_abs_graph(
+    layers,
+    r_reduced = 2):
+
+    abs_var_nodes = {}
+    Bs = {}
+    ks = {}
+    r = 2
+
+    # === 1. Build Abstraction Variables ===
+    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    sup_fg = layers[-2]["graph"]
+
+    for sn in sup_fg.var_nodes:
+        if sn.dofs <= r:
+            r = sn.dofs  # No reduction if dofs already <= r
+        else:
+            r = r_reduced
+
+        sid = sn.variableID
+        varis_sup_mu = sn.mu
+        varis_sup_sigma = sn.Sigma
+        
+        # Step 1: Eigen decomposition of the covariance matrix
+        eigvals, eigvecs = np.linalg.eigh(varis_sup_sigma)
+
+        # Step 2: Sort eigenvalues and eigenvectors in descending order of eigenvalues
+        idx = np.argsort(eigvals)[::-1]      # Get indices of sorted eigenvalues (largest first)
+        eigvals = eigvals[idx]               # Reorder eigenvalues
+        eigvecs = eigvecs[:, idx]            # Reorder corresponding eigenvectors
+
+        # Step 3: Select the top-k eigenvectors to form the projection matrix (principal subspace)
+        B_reduced = eigvecs[:, :r]                 # B_reduced: shape (sup_dof, r), projects r to sup_dof
+        Bs[sid] = B_reduced                        # Store the projection matrix for this variable
+
+        # Step 4: Project eta and Lam onto the reduced 2D subspace
+        varis_abs_mu = B_reduced.T @ varis_sup_mu          # Projected natural mean: shape (2,)
+        varis_abs_sigma = B_reduced.T @ varis_sup_sigma @ B_reduced  # Projected covariance: shape (2, 2)
+        ks[sid] = varis_sup_mu - B_reduced @ varis_abs_mu  # Store the offset for this variable
+
+
+        varis_abs_lam = np.linalg.inv(varis_abs_sigma)  # Inverse covariance (precision matrix): shape (2, 2)
+        varis_abs_eta = varis_abs_lam @ varis_abs_mu  # Natural parameters: shape (2,)
+
+        v = VariableNode(sid, dofs=r)
+        v.GT = sn.GT
+        v.prior.lam = 1e-10 * np.eye(r, dtype=float)
+        v.prior.eta = np.zeros(r, dtype=float)
+        v.mu = varis_abs_mu
+        v.Sigma = varis_abs_sigma
+        v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
+
+        abs_var_nodes[sid] = v
+        abs_fg.var_nodes.append(v)
+    abs_fg.n_var_nodes = len(abs_fg.var_nodes)
+
+
+    # === 2. Abstract Prior ===
+    def make_abs_prior_factor(sup_factor):
+        abs_id = sup_factor.adj_var_nodes[0].variableID
+        B = Bs[abs_id]
+        k = ks[abs_id]
+
+        def meas_fn_abs_prior(x_abs, *args):
+            return sup_factor.meas_fn(B @ x_abs + k)
+        
+        def jac_fn_abs_prior(x_abs, *args):
+            return sup_factor.jac_fn(B @ x_abs + k) @ B
+
+
+        return meas_fn_abs_prior, jac_fn_abs_prior, sup_factor.measurement, sup_factor.measurement_lambda
+    
+
+
+    # === 3. Abstract Between ===
+    def make_abs_between_factor(sup_factor):
+        vids = [v.variableID for v in sup_factor.adj_var_nodes]
+        i, j = vids # two variable IDs
+        ni = abs_var_nodes[i].dofs
+        Bi, Bj = Bs[i], Bs[j]
+        ki, kj = ks[i], ks[j]                       
+    
+
+        def meas_fn_super_between(xij, *args):
+            xi, xj = xij[:ni], xij[ni:]
+            return sup_factor.meas_fn(np.concatenate([Bi @ xi + ki, Bj @ xj + kj]))
+
+        def jac_fn_super_between(xij, *args):
+            xi, xj = xij[:ni], xij[ni:]
+            J_sup = sup_factor.jac_fn(np.concatenate([Bi @ xi + ki, Bj @ xj + kj]))
+            J_abs = np.zeros((J_sup.shape[0], ni + xj.shape[0]))
+            J_abs[:, :ni] = J_sup[:, :Bi.shape[0]] @ Bi
+            J_abs[:, ni:] = J_sup[:, Bi.shape[0]:] @ Bj
+            return J_abs
+        
+        return meas_fn_super_between, jac_fn_super_between, sup_factor.measurement, sup_factor.measurement_lambda
+    
+
+    for f in sup_fg.factors:
+        if len(f.adj_var_nodes) == 1:
+            meas_fn, jac_fn, z, z_lambda = make_abs_prior_factor(f)
+            v = abs_var_nodes[f.adj_var_nodes[0].variableID]
+            abs_f = Factor(f.factorID, [v], z, z_lambda, meas_fn, jac_fn)
+            abs_f.type = "abs_prior"
+            abs_f.adj_beliefs = [v.belief]
+
+            lin0 = v.mu
+            abs_f.compute_factor(linpoint=lin0, update_self=True)
+            abs_fg.factors.append(abs_f)
+            v.adj_factors.append(abs_f)
+
+        elif len(f.adj_var_nodes) == 2:
+            meas_fn, jac_fn, z, z_lambda = make_abs_between_factor(f)
+            i, j = [v.variableID for v in f.adj_var_nodes]
+            vi, vj = abs_var_nodes[i], abs_var_nodes[j]
+            abs_f = Factor(f.factorID, [vi, vj], z, z_lambda, meas_fn, jac_fn)
+            abs_f.type = "abs_between"
+            abs_f.adj_beliefs = [vi.belief, vj.belief]
+
+            lin0 = np.concatenate([vi.mu, vj.mu])
+            abs_f.compute_factor(linpoint=lin0, update_self=True)
+            abs_fg.factors.append(abs_f)
+            vi.adj_factors.append(abs_f)
+            vj.adj_factors.append(abs_f)
+    abs_fg.n_factor_nodes = len(abs_fg.factors)
+
+
+    return abs_fg, Bs, ks
+
 
 
 # -----------------------
@@ -659,7 +786,7 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("prior prop:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-prop", type="number", value=0, step=0.01, min=0, max=1,
+            dcc.Input(id="prior-prop", type="number", value=0.01, step=0.01, min=0, max=1,
                       style={"width":"100px"})
 
         ], style={"flex":"1"}),
@@ -779,7 +906,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
         radius = float(pRadius or 50)
-        prior_prop=float(pPriorProp or 0.0)
+        prior_prop=float(pPriorProp or 0.00)
         layers = init_layers(N, step, prob, radius, prior_prop)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
@@ -801,14 +928,19 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         if kind == "super":
             abs_layer_idx = k*2
             abs_nodes, abs_edges = copy_to_abs(last["nodes"], last["edges"], abs_layer_idx)
+
+            # Ensure super graph has run at least once
+            layers[-1]["graph"].synchronous_iteration()  
+
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
+            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"] = build_abs_graph(layers, r_reduced=2)
         else:
             k_next = pair_idx + 1
             super_layer_idx = k_next*2 - 1
             if mode == "grid":
                 super_nodes, super_edges, node_map = fuse_to_super_grid(last["nodes"], last["edges"], int(gx or 2), int(gy or 2), super_layer_idx)
             else:
-                super_nodes, super_edges, node_map = fuse_to_super_knn(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
+                super_nodes, super_edges, node_map = fuse_to_super_kmeans(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
             layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
