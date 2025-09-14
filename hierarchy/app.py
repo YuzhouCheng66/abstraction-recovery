@@ -962,15 +962,24 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 )
 def update_layer(layer_name, _options, gbp_poses):
     layer = next(l for l in layers if l["name"] == layer_name)
-    nodes, edges = layer["nodes"], layer["edges"]
+    orig_nodes, edges = layer["nodes"], layer["edges"]
     edges = [e for e in edges if e["data"].get("target") != "prior"]
 
-    # 如果是 base 层，并且有 GBP 结果，覆盖坐标
-    if layer_name == "base" and gbp_poses:
-        m = min(len(nodes), len(gbp_poses))
-        for i in range(m):
-            nodes[i]["position"]["x"] = float(gbp_poses[i][0])
-            nodes[i]["position"]["y"] = float(gbp_poses[i][1])
+    # 当前层的 GBP 解算结果（如果有）
+    result = layer.get("gbp_result", None)
+
+    nodes = []
+    for n in orig_nodes:
+        new_n = {
+            "data": dict(n["data"]),
+            "position": dict(n["position"])
+        }
+        if result and new_n["data"]["id"] in result:
+            mu = result[new_n["data"]["id"]]
+            if len(mu) >= 2:
+                new_n["position"]["x"] = float(mu[0])
+                new_n["position"]["y"] = float(mu[1])
+        nodes.append(new_n)
 
     axis_nodes = [
         {"data":{"id":"x_axis_start"},"position":{"x":GLOBAL_XMIN_ADJ-AXIS_PAD,"y":0},"classes":"axis-node"},
@@ -1027,73 +1036,108 @@ from dash import no_update
     State("gbp-state", "data"),
     State("param-iters","value"),
     State("param-snap","value"),
+    State("layer-select", "value"),   # 新增
     prevent_initial_call=True
 )
 
-def gbp_unified(run_clicks, interval_ticks, new_graph_clicks, state, iters, snap_int):
-    global gbp_graph
+def gbp_unified(run_clicks, interval_ticks, new_graph_clicks,
+                state, iters, snap_int, current_layer):
     ctx = dash.callback_context
     if not ctx.triggered:
         return no_update, no_update, no_update, True, no_update
 
     trig = ctx.triggered[0]["prop_id"]
 
+    # 找到当前选中的 layer 的 graph
+    layer = next((L for L in layers if L["name"] == current_layer), None)
+    graph = layer.get("graph", None) if layer else None
+
     # 1) New Graph 触发：立刻急停并复位可视化相关状态
     if trig.startswith("new-graph"):
-        # 可选：如果你有 gbp_snapshots 全局，就清一下
-        # global gbp_snapshots
-        # gbp_snapshots = []
-
-        # 复位 state；保留 snap_int（用户下次点 GBP 时还能用）
-        snap_keep = (state or {}).get("snap_int", 5)
+        if not isinstance(state, dict):
+            state = {}
+        snap_keep = state.get("snap_int", 5)
         reset_state = {"running": False, "iters_done": 0, "iters_total": 0, "snap_int": snap_keep}
-
-        # 关闭 interval，清空 gbp-poses，这样 Cytoscape 会按 GT 显示
         return None, "Ready. New graph created and previous solver stopped.", reset_state, True, 0
 
+
     # 2) 点按钮：初始化并启动 interval
-    if trig.startswith("gbp-run"):                                         
-        if gbp_graph is None:
-            return no_update, "No factor graph yet. Click New Graph first.", no_update, True, no_update
+    if trig.startswith("gbp-run"):
+        if graph is None:
+            return no_update, f"No factor graph yet in {current_layer}.", no_update, True, no_update
         iters = int(iters or 50)
         snap_int = int(snap_int or 5)
         state = {"running": True, "iters_done": 0, "iters_total": iters, "snap_int": snap_int}
-        status = f"GBP running... 0 / {iters}"
-        return no_update, status, state, False, 0  # 打开 interval & 重置 tick 计数
+        status = f"GBP running on {current_layer}... 0 / {iters}"
+        return no_update, status, state, False, 0
 
     # 3) interval 驱动：做一批迭代
-    if not state or not state.get("running") or gbp_graph is None:
-        # 没在跑，保险地把 interval 关掉
+    if not state or not state.get("running") or graph is None:
         return no_update, no_update, state, True, no_update
 
     iters_done  = int(state["iters_done"])
     iters_total = int(state["iters_total"])
     snap_int    = int(state["snap_int"])
-
     remaining = iters_total - iters_done
     batch = max(1, min(snap_int, remaining))
 
     for _ in range(batch):
-        gbp_graph.synchronous_iteration()
+        graph.synchronous_iteration()
 
-    latest_positions = [v.mu.copy().tolist() for v in gbp_graph.var_nodes]
+    latest_positions = {}
+
+    for v in graph.var_nodes:
+        dim = v.dofs
+
+        # --- base graph: 2D ---
+        if dim == 2:
+            pos = v.mu[:2]
+
+        # --- super graph: 2kD, k>=2 ---
+        elif dim % 2 == 0 and "super" in current_layer:
+            pts = v.mu.reshape(-1, 2)
+            pos = pts.mean(axis=0)
+
+        # --- abs graph: reduced dim, need to lift back ---
+        elif "abs" in current_layer:
+            # 找到对应的投影矩阵 B 和 偏移 k
+            sid = v.variableID
+            B = layer.get("Bs", {}).get(sid, None)
+            k = layer.get("ks", {}).get(sid, None)
+
+            print(B.shapec)
+            if B is not None and k is not None:
+                lifted = B @ v.mu + k  # 回到高维
+                pts = lifted.reshape(-1, 2)
+                pos = pts.mean(axis=0)
+            else:
+                pos = np.zeros(2)
+
+        else:
+            pos = np.zeros(2)
+
+        latest_positions[str(v.variableID)] = pos.tolist()
+    
+
+    # 保存到对应 layer
+    layer["gbp_result"] = latest_positions
 
     iters_done += batch
     state["iters_done"] = iters_done
     finished = (iters_done >= iters_total)
     state["running"] = (not finished)
 
-    # 已经在 gbp.py 里加了 energy_map，这里可以显示能量
-    e = getattr(gbp_graph, "energy_map")(include_priors=True, include_factors=True)
-    energy_txt = f", energy {e:.6f}"
+    # 暂时去掉 energy_map，避免 abs 层报错
+    # e = getattr(graph, "energy_map")(include_priors=True, include_factors=True)
+    # energy_txt = f", energy {e:.6f}"
+    energy_txt = ""
 
-
-    status = (f"GBP running... {iters_done} / {iters_total}{energy_txt}"
+    status = (f"GBP running on {current_layer}... {iters_done} / {iters_total}{energy_txt}"
               if not finished
-              else f"GBP finished {iters_total} iterations{energy_txt}.")
+              else f"GBP finished {iters_total} iterations on {current_layer}{energy_txt}.")
 
-    # 完成就关 interval
     return latest_positions, status, state, finished, no_update
+
 
 
 # -----------------------
