@@ -26,9 +26,10 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
         positions.append((x, y))
     for i, (px, py) in enumerate(positions):
         nodes.append({
-            "data": {"id": f"{i}", "layer": 0, "dim": 2},
+            "data": {"id": f"{i}", "layer": 0, "dim": 2, "num_base": 1},
             "position": {"x": float(px), "y": float(py)}
         })
+
     for i in range(int(N) - 1):
         edges.append({"data": {"source": f"{i}", "target": f"{i+1}"}})
     for i in range(int(N)):
@@ -81,10 +82,17 @@ def fuse_to_super_grid(prev_nodes, prev_edges, gx, gy, layer_idx):
         pts = positions[indices]
         mean_x, mean_y = pts.mean(axis=0)
         child_dims = [prev_nodes[i]["data"]["dim"] for i in indices]
+        child_nums = [prev_nodes[i]["data"].get("num_base", 1) for i in indices]
         dim_val = int(max(1, sum(child_dims)))
+        num_val = int(sum(child_nums))
         nid = str(len(super_nodes))
         super_nodes.append({
-            "data": {"id": nid, "layer": layer_idx, "dim": dim_val},
+            "data": {
+                "id": nid,
+                "layer": layer_idx,
+                "dim": dim_val,
+                "num_base": num_val   # 继承总和
+            },
             "position": {"x": float(mean_x), "y": float(mean_y)}
         })
         for i in indices:
@@ -179,10 +187,17 @@ def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol
         pts = positions[idxs]
         mean_x, mean_y = pts.mean(axis=0)
         child_dims = [prev_nodes[i]["data"]["dim"] for i in idxs]
+        child_nums = [prev_nodes[i]["data"].get("num_base", 1) for i in idxs]
         dim_val = int(max(1, sum(child_dims)))
+        num_val = int(sum(child_nums)) 
         nid = f"{ci}"
         super_nodes.append({
-            "data": {"id": nid, "layer": layer_idx, "dim": dim_val},
+            "data": {
+                "id": nid,
+                "layer": layer_idx,
+                "dim": dim_val,
+                "num_base": num_val   # 继承总和
+            },
             "position": {"x": float(mean_x), "y": float(mean_y)}
         })
         for i in idxs:
@@ -218,7 +233,12 @@ def copy_to_abs(super_nodes, super_edges, layer_idx):
     for n in super_nodes:
         nid = n["data"]["id"].replace("s", "a", 1)
         abs_nodes.append({
-            "data": {"id": nid, "layer": layer_idx, "dim": n["data"]["dim"]},
+            "data": {
+                "id": nid,
+                "layer": layer_idx,
+                "dim": n["data"]["dim"],
+                "num_base": n["data"].get("num_base", 1)  # 继承
+            },
             "position": {"x": n["position"]["x"], "y": n["position"]["y"]}
         })
     abs_edges = []
@@ -787,7 +807,16 @@ app.layout = html.Div([
 
             html.Span("prior prop:", style={"marginRight":"6px"}),
             dcc.Input(id="prior-prop", type="number", value=0.01, step=0.01, min=0, max=1,
-                      style={"width":"100px"})
+                      style={"width":"100px", "marginRight":"12px"}),
+
+            html.Span("show number:", style={"marginRight":"6px"}),
+            dcc.Checklist(
+                id="show-number",
+                options=[{"label": "", "value": "on"}],
+                value=["on"],   # ✅ 默认勾选
+                style={"display": "inline-block", "marginRight":"12px"}
+            ),
+
 
         ], style={"flex":"1"}),
 
@@ -828,15 +857,15 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Span("prior σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-noise", type="number", value=1.0, step=0.1,
+            dcc.Input(id="prior-noise", type="number", value=1.0, step=0.01,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("odom σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.1,
+            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.01,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("iters:", style={"marginRight":"6px"}),
-            dcc.Input(id="param-iters", type="number", value=500, step=1,
+            dcc.Input(id="param-iters", type="number", value=50, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("snap:", style={"marginRight":"6px"}),
@@ -931,6 +960,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
             # Ensure super graph has run at least once
             layers[-1]["graph"].synchronous_iteration()  
+            layers[-1]["graph"].synchronous_iteration() 
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
             layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"] = build_abs_graph(layers, r_reduced=2)
@@ -959,9 +989,14 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
     Input("layer-select","value"),
     Input("layer-select","options"),
     Input("gbp-poses","data"),
+    Input("show-number","value"),
 )
-def update_layer(layer_name, _options, gbp_poses):
-    layer = next(l for l in layers if l["name"] == layer_name)
+def update_layer(layer_name, _options, gbp_poses, show_number):
+    # 找到当前 layer
+    layer = next((l for l in layers if l["name"] == layer_name), None)
+    if layer is None:
+        return [], [], {"name": "preset"}
+
     orig_nodes, edges = layer["nodes"], layer["edges"]
     edges = [e for e in edges if e["data"].get("target") != "prior"]
 
@@ -969,52 +1004,84 @@ def update_layer(layer_name, _options, gbp_poses):
     result = layer.get("gbp_result", None)
 
     nodes = []
+    base_count = len(layers[0]["nodes"]) if layers else 1
+    alpha = 0.3  # <1 → 前期变快，后期变慢
+
     for n in orig_nodes:
         new_n = {
             "data": dict(n["data"]),
             "position": dict(n["position"])
         }
+
+        # 应用 GBP 更新的位姿
         if result and new_n["data"]["id"] in result:
             mu = result[new_n["data"]["id"]]
-            if len(mu) >= 2:
-                new_n["position"]["x"] = float(mu[0])
-                new_n["position"]["y"] = float(mu[1])
+            new_n["position"]["x"] = float(mu[0])
+            new_n["position"]["y"] = float(mu[1])
+
+        nb = int(new_n["data"].get("num_base", 1))
+
+        # ==== 颜色值 (幂次缩放) ====
+        color_val = float(((nb / base_count) ** alpha) * base_count)
+        new_n["data"]["color_val"] = color_val
+
+        # ==== 原始半径 ====
+        size_linear = 4
+
+        # ==== 对数缩放半径 ====
+        size_val = float(size_linear * (np.log(1 + nb) / np.log(4)))
+        new_n["data"]["size_val"] = size_val
+
         nodes.append(new_n)
 
+    # 坐标轴
     axis_nodes = [
-        {"data":{"id":"x_axis_start"},"position":{"x":GLOBAL_XMIN_ADJ-AXIS_PAD,"y":0},"classes":"axis-node"},
-        {"data":{"id":"x_axis_end"},"position":{"x":GLOBAL_XMAX_ADJ+AXIS_PAD,"y":0},"classes":"axis-node"},
-        {"data":{"id":"y_axis_start"},"position":{"x":0,"y":GLOBAL_YMIN_ADJ-AXIS_PAD},"classes":"axis-node"},
-        {"data":{"id":"y_axis_end"},"position":{"x":0,"y":GLOBAL_YMAX_ADJ+AXIS_PAD},"classes":"axis-node"},
+        {"data": {"id": "x_axis_start"}, "position": {"x": float(GLOBAL_XMIN_ADJ - AXIS_PAD), "y": 0}, "classes": "axis-node"},
+        {"data": {"id": "x_axis_end"},   "position": {"x": float(GLOBAL_XMAX_ADJ + AXIS_PAD), "y": 0}, "classes": "axis-node"},
+        {"data": {"id": "y_axis_start"}, "position": {"x": 0, "y": float(GLOBAL_YMIN_ADJ - AXIS_PAD)}, "classes": "axis-node"},
+        {"data": {"id": "y_axis_end"},   "position": {"x": 0, "y": float(GLOBAL_YMAX_ADJ + AXIS_PAD)}, "classes": "axis-node"},
     ]
     axis_edges = [
-        {"data":{"source":"x_axis_start","target":"x_axis_end"},"classes":"axis"},
-        {"data":{"source":"y_axis_start","target":"y_axis_end"},"classes":"axis"},
+        {"data": {"source": "x_axis_start", "target": "x_axis_end"}, "classes": "axis"},
+        {"data": {"source": "y_axis_start", "target": "y_axis_end"}, "classes": "axis"},
     ]
+
+    label_style = "data(num_base)" if ("on" in show_number) else ""
     elements = nodes + edges + axis_nodes + axis_edges
 
-    min_dim, min_size = 2, 3
-    base_count = len(layers[0]["nodes"]) if layers else 1
-    max_dim, max_size = max(2*base_count, min_dim+1), 10
-    max_layer_idx = max(n["data"]["layer"] for L in layers for n in L["nodes"]) or 1
-
     stylesheet = [
-        {"selector":"node","style":{
-            "shape":"ellipse",
-            "width":f"mapData(dim,{min_dim},{max_dim},{min_size},{max_size})",
-            "height":f"mapData(dim,{min_dim},{max_dim},{min_size},{max_size})",
-            "background-color":f"mapData(layer,0,{max_layer_idx},white,black)",
-            "label":"",
-            "border-width":1,"border-color":"black"}},
-        {"selector":"edge","style":{"line-color":"#888","width":1}},
-        {"selector":".axis","style":{
-            "line-color":"black","width":1,"target-arrow-shape":"triangle",
-            "arrow-scale":1,"curve-style":"straight"}},
-        {"selector":".axis-node","style":{
-            "width":1,"height":1,"background-color":"white","border-width":0,"opacity":0.0}},
+        {"selector": "node", "style": {
+            "shape": "ellipse",
+            "width": "data(size_val)",
+            "height": "data(size_val)",
+            "background-color": f"mapData(color_val,1,{base_count},hsl(120,100%,40%),hsl(0,100%,50%))",
+            "label": label_style,
+            "font-size": 8,
+            "text-valign": "top",
+            "border-width": f"mapData(size_val,1,20,0.2,1.0)",   # size_val 小=0.2px，大=1px
+            "border-color": "rgba(0,0,0,0)"                   # 柔和灰边
+        }},
+
+        {"selector": "edge", "style": {
+            "line-color": "rgba(136,136,136,0.1)",  # #888 ≈ (136,136,136)，透明度 0.1 = 90% 透明
+            "width": 0.9
+        }},
+        {"selector": ".axis", "style": {
+            "line-color": "black", "width": 1,
+            "target-arrow-shape": "triangle",
+            "arrow-scale": 1, "curve-style": "straight"
+        }},
+        {"selector": ".axis-node", "style": {
+            "width": 1, "height": 1, "background-color": "white",
+            "border-width": 0, "opacity": 0.0
+        }},
     ]
-    layout = {"name":"preset"}
+
+    layout = {"name": "preset"}
     return elements, stylesheet, layout
+
+
+
 
 # -----------------------
 # 合并的 GBP 回调（按钮 + interval）
@@ -1090,31 +1157,24 @@ def gbp_unified(run_clicks, interval_ticks, new_graph_clicks,
         dim = v.dofs
 
         # --- base graph: 2D ---
-        if dim == 2:
+        if current_layer.startswith("base"):
             pos = v.mu[:2]
 
         # --- super graph: 2kD, k>=2 ---
-        elif dim % 2 == 0 and "super" in current_layer:
+        elif current_layer.startswith("super"):
             pts = v.mu.reshape(-1, 2)
             pos = pts.mean(axis=0)
 
         # --- abs graph: reduced dim, need to lift back ---
-        elif "abs" in current_layer:
+        elif current_layer.startswith("abs"):
             # 找到对应的投影矩阵 B 和 偏移 k
-            sid = v.variableID
-            B = layer.get("Bs", {}).get(sid, None)
-            k = layer.get("ks", {}).get(sid, None)
+            aid = v.variableID
+            B = layer.get("Bs", {}).get(aid, None)
+            k = layer.get("ks", {}).get(aid, None)
 
-            print(B.shapec)
-            if B is not None and k is not None:
-                lifted = B @ v.mu + k  # 回到高维
-                pts = lifted.reshape(-1, 2)
-                pos = pts.mean(axis=0)
-            else:
-                pos = np.zeros(2)
-
-        else:
-            pos = np.zeros(2)
+            lifted = B @ v.mu + k  # 回到高维
+            pts = lifted.reshape(-1, 2)
+            pos = pts.mean(axis=0)
 
         latest_positions[str(v.variableID)] = pos.tolist()
     
