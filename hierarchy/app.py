@@ -413,6 +413,19 @@ def build_noisy_pose_graph(
             vi.adj_factors.append(f)
             fid += 1
 
+        # anchor for initial position
+        v0 = var_nodes[0]
+        z = v0.GT
+
+        z_lambda = np.eye(len(meas))/ ((1e-3)**2)
+        f = Factor(fid, [v0], z, z_lambda, meas_fn_unary, jac_fn_unary)
+        f.type = "prior"
+        f.compute_factor(linpoint=z, update_self=True)
+
+        factors.append(f)
+        v0.adj_factors.append(f)
+        fid += 1
+
     fg.factors = factors
     fg.n_factor_nodes = len(factors)
     return fg
@@ -479,6 +492,22 @@ def build_super_graph(layers):
 
         super_var_nodes[sid] = v
         fg.var_nodes.append(v)
+
+        # === 叠加 base belief ===
+        mu_blocks = []
+        Sigma_blocks = []
+        for bid, (st, d) in local_idx[sid].items():
+            vb = id2var[bid]
+            mu_blocks.append(vb.mu)
+            Sigma_blocks.append(vb.Sigma)
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
+        Sigma_super = scipy.linalg.block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
+
+        lam = np.linalg.inv(Sigma_super)
+        eta = lam @ mu_super
+        v.mu = mu_super
+        v.Sigma = Sigma_super
+        v.belief = NdimGaussian(dofs, eta, lam)
 
 
     fg.n_var_nodes = len(fg.var_nodes)
@@ -629,6 +658,7 @@ def build_super_graph(layers):
         if v == "prior":
             meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, base_graph.factors)
             f = Factor(len(fg.factors), [super_var_nodes[u]], z, z_lambda, meas_fn, jac_fn)
+            f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
             f.type = "super_prior"
             lin0 = make_linpoint_for_group(u)
             f.compute_factor(linpoint=lin0, update_self=True)
@@ -638,6 +668,7 @@ def build_super_graph(layers):
         else:
             meas_fn, jac_fn, z, z_lambda = make_super_between_factor(u, v, base_graph.factors)
             f = Factor(len(fg.factors), [super_var_nodes[u], super_var_nodes[v]], z, z_lambda, meas_fn, jac_fn)
+            f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
             f.type = "super_between"
             lin0 = np.concatenate([make_linpoint_for_group(u), make_linpoint_for_group(v)])
             f.compute_factor(linpoint=lin0, update_self=True)
@@ -648,6 +679,44 @@ def build_super_graph(layers):
 
     fg.n_factor_nodes = len(fg.factors)
     return fg
+
+
+def refresh_gbp_results(layers):
+    """
+    遍历所有层，为每一层单独生成 gbp_result (dict: node_id -> [x,y])。
+    - base 层：直接取 mu[:2]
+    - super 层：用 node['data']['id'] 对齐
+    - abs 层：key 用 "a{idx}"，和 copy_to_abs 的 id 对齐
+    """
+    for L in layers:
+        g = L.get("graph", None)
+        if g is None:
+            L.pop("gbp_result", None)
+            continue
+
+        res = {}
+        if L["name"].startswith("base"):
+            for v in g.var_nodes:
+                res[str(v.variableID)] = v.mu[:2].tolist()
+
+        elif L["name"].startswith("super"):
+            # ⚠️ super 用 node 的真实 id（通常是 "0","1",...）
+            for idx, v in enumerate(g.var_nodes):
+                pts = v.mu.reshape(-1, 2)
+                node_id = L["nodes"][idx]["data"]["id"]   # 保持一致
+                res[node_id] = pts.mean(axis=0).tolist()
+
+        elif L["name"].startswith("abs"):
+            Bs, ks = L.get("Bs", {}), L.get("ks", {})
+            for idx, av in enumerate(g.var_nodes):
+                sid = av.variableID
+                lifted = Bs[sid] @ av.mu + ks[sid]
+                pts = lifted.reshape(-1, 2)
+                node_id = L["nodes"][idx]["data"]["id"]   # copy_to_abs 已经是 "a0","a1"
+                res[node_id] = pts.mean(axis=0).tolist()
+
+        L["gbp_result"] = res
+
 
 
 def build_abs_graph(
@@ -780,6 +849,281 @@ def build_abs_graph(
     return abs_fg, Bs, ks
 
 
+def vloop(layers):
+    """
+    执行一个 V-cycle（不新增层，只在已有层之间重建/传递）：
+    1) bottom-up：从 base → ... → 顶层
+       - 每层先迭代一次
+       - 如果下一层是 super：用当前层最新 belief 重建该 super graph
+       - 如果下一层是 abs  ：用当前 super 的最新 belief 重建该 abs graph（并刷新 Bs/ks）
+    2) top-down：从顶层 → ... → base
+       - 每层先迭代一次
+       - abs → super：用 Bs/ks 把抽象均值提升回 super
+       - super → prev：按 node_map 分块把均值拆回下层（保持构图时的顺序与维度）
+    最后：为所有层刷新 gbp_result（用于 UI）
+    """
+
+    # -------- 1) bottom-up --------
+    for idx, L in enumerate(layers):
+        # 确保当前层有 graph（base 在 new-graph 时就已经建好）
+        g = L.get("graph", None)
+        if g is not None:
+            g.synchronous_iteration()
+
+        # 如果有“下一层”，根据类型重建它的 graph
+        if idx + 1 < len(layers):
+            nxt = layers[idx + 1]
+
+            if nxt["name"].startswith("super"):
+                # 用当前层（idx）为“基”，重建 super[idx+1]
+                # build_super_graph 约定：layers[-2] 是“基层”，layers[-1] 是待建的 super 层
+                # 所以传切片，保证相对位置正确
+                nxt["graph"] = build_super_graph(layers[:idx + 2])
+
+            elif nxt["name"].startswith("abs"):
+                # 用当前 super（idx）为“基”，重建 abs[idx+1] 并更新 Bs/ks
+                abs_graph, Bs, ks = build_abs_graph(layers[:idx + 2], r_reduced=2)
+                nxt["graph"] = abs_graph
+                nxt["Bs"] = Bs
+                nxt["ks"] = ks
+
+    # -------- 2) top-down --------
+    for idx in range(len(layers) - 1, 0, -1):
+        L = layers[idx]
+        prevL = layers[idx - 1]
+        g = L.get("graph", None)
+        if g is not None:
+            g.synchronous_iteration()
+
+        # abs → super：用 Bs/ks 把抽象均值提升回 super
+        if L["name"].startswith("abs"):
+            sup_g = prevL["graph"]
+            Bs = L.get("Bs", {})
+            ks = L.get("ks", {})
+            if sup_g is None:
+                # 保险：如果 super 的图还没建（理论上 bottom-up 已经建了）
+                prevL["graph"] = build_super_graph(layers[:idx + 1])
+                sup_g = prevL["graph"]
+
+            for av in L["graph"].var_nodes:
+                sid = av.variableID                 # 注意：abs 的 variableID == super 的 variableID（整数）
+                B = Bs[sid]
+                k = ks[sid]
+                lifted = B @ av.mu + k
+                sup_g.var_nodes[sid].mu = lifted
+
+            sup_g.synchronous_iteration()
+
+        # super → prev（base 或 abs 之下的层）：按 node_map 把均值分块拆回
+        elif L["name"].startswith("super"):
+            super_g = L["graph"]
+            prev_g = prevL["graph"]
+            node_map = L.get("node_map", {})
+
+            if prev_g is None:
+                # 保险：如果下层图没建，按类型补建
+                if prevL["name"].startswith("abs"):
+                    ag, Bs, ks = build_abs_graph(layers[:idx], r_reduced=2)
+                    prevL["graph"], prevL["Bs"], prevL["ks"] = ag, Bs, ks
+                else:
+                    prevL["graph"] = prev_g = layers[0]["graph"]
+            prev_g = prevL["graph"]
+
+            # super 的字符串 id -> super 图里的整数 variableID
+            sid2idx = {sn["data"]["id"]: i for i, sn in enumerate(L["nodes"])}
+
+            # 收集每个 super 节点的子节点（保持 node_map 的插入顺序）
+            groups = {}
+            for b_str, s_str in node_map.items():
+                groups.setdefault(s_str, []).append(int(b_str))
+
+            # 把 super 的 mu 按块写回下层
+            for s_str, b_ids in groups.items():
+                s_idx = sid2idx[s_str]            # super 的整数 variableID（与 var_nodes 索引一致）
+                sv = super_g.var_nodes[s_idx]
+                off = 0
+                for bid in b_ids:
+                    d = prev_g.var_nodes[bid].dofs
+                    prev_g.var_nodes[bid].mu = sv.mu[off:off + d].copy()
+                    off += d
+
+            prev_g.synchronous_iteration()
+
+    # -------- 3) 刷新所有层的 gbp_result（用于 UI） --------
+    for L in layers:
+        g = L.get("graph", None)
+
+
+def vloop(layers):
+    """
+    One V-cycle on the EXISTING pyramid (no new layers are created):
+    bottom-up:  rebuild super/abs graphs from the layer below (to refresh Bs/ks etc.)
+                and run one synchronous_iteration per layer.
+    top-down :  propagate beliefs back (abs->super via B,k; super->lower via block split),
+                running one synchronous_iteration on the lower layer after each propagation.
+    Finally, refresh per-layer 'gbp_result' for UI.
+    """
+
+    # ---------- helpers ----------
+
+    def rebuild_super_at(i):
+        """Rebuild super graph at index i from its lower layer i-1 using build_super_graph."""
+        lower = layers[i - 1]
+        upper = layers[i]
+        assert upper["name"].startswith("super")
+        # build_super_graph expects layers[-2] to be the lower graph, layers[-1] the super layer
+        tmp = [ {"graph": lower["graph"]}, upper ]
+        upper["graph"] = build_super_graph(tmp)
+
+    def rebuild_abs_at(i):
+        """Rebuild abs graph at index i from its lower SUPER layer i-1 using build_abs_graph, store Bs/ks."""
+        sup_layer = layers[i - 1]
+        abs_layer = layers[i]
+        assert abs_layer["name"].startswith("abs")
+        # build_abs_graph expects layers[-2] to be the super graph, layers[-1] the abs layer
+        tmp = [ {"graph": sup_layer["graph"]}, abs_layer ]
+        abs_graph, Bs, ks = build_abs_graph(tmp, r_reduced=2)
+        abs_layer["graph"] = abs_graph
+        abs_layer["Bs"] = Bs
+        abs_layer["ks"] = ks
+
+    def lift_abs_to_super(i):
+        """Propagate abs belief to its upper super layer (which is i-1 in the list)."""
+        abs_layer = layers[i]
+        sup_layer = layers[i - 1]
+        Bs = abs_layer.get("Bs", {})
+        ks = abs_layer.get("ks", {})
+        for av in abs_layer["graph"].var_nodes:
+            sid = av.variableID          # in build_abs_graph we used sid (= super var id) as variableID
+            B = Bs[sid]; k = ks[sid]
+            sup_layer["graph"].var_nodes[sid].mu = (B @ av.mu + k).copy()
+
+    def scatter_super_to_lower(i):
+        """
+        Propagate super belief to the LOWER layer (i-1), which can be base OR abs.
+        We reconstruct the same block order using node_map and the lower layer's dofs.
+        """
+        sup_layer = layers[i]
+        low_layer = layers[i - 1]
+        node_map = sup_layer["node_map"]  # maps lower-layer node id (str) -> super id (str)
+
+        # Build id->var for lower layer
+        id2var_low = {vn.variableID: vn for vn in low_layer["graph"].var_nodes}
+
+        # Group lower ids by super id, preserving node_map insertion order
+        super_groups = {}
+        for low_str, s_str in node_map.items():
+            low_id = int(low_str); sid = int(s_str)
+            super_groups.setdefault(sid, []).append(low_id)
+
+        # Rebuild the local index (start offset, dofs) per super variable
+        local_idx = {}
+        for sid, members in super_groups.items():
+            off = 0
+            local_idx[sid] = {}
+            for low_id in members:
+                d = id2var_low[low_id].dofs
+                local_idx[sid][low_id] = (off, d)
+                off += d
+
+        # Scatter each block back to the lower layer
+        for sid, members in super_groups.items():
+            sv = sup_layer["graph"].var_nodes[sid]
+            for low_id in members:
+                st, d = local_idx[sid][low_id]
+                id2var_low[low_id].mu = sv.mu[st:st+d].copy()
+
+    def refresh_gbp_result_for_layer(i):
+        """Recompute the UI positions for layer i and store into layers[i]['gbp_result']."""
+        L = layers[i]
+        g = L.get("graph", None)
+        if g is None:
+            L.pop("gbp_result", None)
+            return
+        res = {}
+        name = L["name"]
+        if name.startswith("base"):
+            for v in g.var_nodes:
+                res[str(v.variableID)] = v.mu[:2].tolist()
+        elif name.startswith("super"):
+            for idx, v in enumerate(g.var_nodes):
+                pts = v.mu.reshape(-1, 2)
+                res[str(idx)] = pts.mean(axis=0).tolist()
+        else:  # abs
+            Bs, ks = L.get("Bs", {}), L.get("ks", {})
+            for av in g.var_nodes:
+                sid = av.variableID
+                lifted = Bs[sid] @ av.mu + ks[sid]   # back to the super space
+                pts = lifted.reshape(-1, 2)
+                res[str(sid)] = pts.mean(axis=0).tolist()
+        L["gbp_result"] = res
+
+    # ---------- bottom-up: rebuild & iterate ----------
+
+    # base (index 0)
+    if layers and "graph" in layers[0]:
+        layers[0]["graph"].synchronous_iteration()
+
+    # from 1 .. end
+    for i in range(1, len(layers)):
+        name = layers[i]["name"]
+        if name.startswith("super"):
+            rebuild_super_at(i)
+            layers[i]["graph"].synchronous_iteration()
+        elif name.startswith("abs"):
+            rebuild_abs_at(i)
+            layers[i]["graph"].synchronous_iteration()
+
+    # ---------- top-down: propagate & iterate lower ----------
+
+    # from top down to index 1 (since each step touches i-1)
+    for i in range(len(layers) - 1, 0, -1):
+        name = layers[i]["name"]
+        if name.startswith("abs"):
+            # abs -> its super (i-1)
+            lift_abs_to_super(i)
+            layers[i - 1]["graph"].synchronous_iteration()
+        elif name.startswith("super"):
+            # super -> its lower (i-1), lower may be base OR abs
+            scatter_super_to_lower(i)
+            layers[i - 1]["graph"].synchronous_iteration()
+
+    # ---------- refresh UI results for ALL layers ----------
+    for i in range(len(layers)):
+        refresh_gbp_result_for_layer(i)
+
+
+def vloop(layers):
+    """
+    简化版 V-cycle:
+    1. bottom-up: base/super/abs 层依次 rebuild 并迭代一次
+    2. top-down : 暂不传回 mu (占位)
+    3. 每层刷新 gbp_result 供 UI 使用
+    """
+
+    # ---- bottom-up ----
+    if layers and "graph" in layers[0]:
+        layers[0]["graph"].synchronous_iteration()
+
+    for i in range(1, len(layers)):
+        name = layers[i]["name"]
+        if name.startswith("super"):
+            # 用前一层的 graph 重建 super
+            layers[i]["graph"] = build_super_graph(layers[:i+1])
+        elif name.startswith("abs"):
+            # 用前一层 super 重建 abs
+            abs_graph, Bs, ks = build_abs_graph(layers[:i+1], r_reduced=2)
+            layers[i]["graph"] = abs_graph
+            layers[i]["Bs"], layers[i]["ks"] = Bs, ks
+
+        # 每一层 rebuild 后迭代一次
+        if "graph" in layers[i]:
+            layers[i]["graph"].synchronous_iteration()
+
+    # ---- top-down (占位，不传 mu) ----
+    # 目前跳过传递，仅保留迭代框架，未来可加回去
+
+
 
 # -----------------------
 # Layout
@@ -790,7 +1134,7 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Span("N:", style={"marginRight":"6px"}),
-            dcc.Input(id="param-N", type="number", value=500, min=2, step=1,
+            dcc.Input(id="param-N", type="number", value=256, min=2, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("step:", style={"marginRight":"6px"}),
@@ -806,7 +1150,7 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("prior prop:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-prop", type="number", value=0.01, step=0.01, min=0, max=1,
+            dcc.Input(id="prior-prop", type="number", value=0.02, step=0.01, min=0, max=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("show number:", style={"marginRight":"6px"}),
@@ -843,7 +1187,7 @@ app.layout = html.Div([
             dcc.Input(id="grid-gy", type="number", value=2, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("K:", style={"marginRight":"6px"}),
-            dcc.Input(id="kmeans-k", type="number", value=200, min=1, step=1,
+            dcc.Input(id="kmeans-k", type="number", value=128, min=1, step=1,
                       style={"width":"100px"})
         ], style={"flex":"1"}),
 
@@ -865,11 +1209,11 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("iters:", style={"marginRight":"6px"}),
-            dcc.Input(id="param-iters", type="number", value=50, step=1,
+            dcc.Input(id="param-iters", type="number", value=5, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("snap:", style={"marginRight":"6px"}),
-            dcc.Input(id="param-snap", type="number", value=1, step=1,
+            dcc.Input(id="param-snap", type="number", value=0.1, step=0.1,
                       style={"width":"100px"})
         ], style={"flex":"1"}),
 
@@ -879,6 +1223,15 @@ app.layout = html.Div([
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px 10px"}),
 
+    # 行4：V Cycle 控制
+    html.Div([
+        html.Div([
+            html.Button("V Cycle", id="vcycle-run", n_clicks=0,
+                        style={"display":"block", "background":"#222","color":"#fff","width":"120px"})
+        ], style={"marginLeft":"20px", "flex":"0 0 auto"})
+    ], style={"display":"flex", "justifyContent":"flex-end", "alignItems":"center", "margin":"6px 10px"}),
+
+
     # 下面保持不变
     dcc.Dropdown(
         id="layer-select",
@@ -887,10 +1240,16 @@ app.layout = html.Div([
     ),
 
     html.Div(id="gbp-status", style={"margin":"6px 10px", "fontStyle":"italic", "color":"#444"}),
+    html.Div(id="vcycle-status", style={"margin":"6px 10px", "fontStyle":"italic", "color":"#444"}),
+
 
     dcc.Store(id="gbp-state", data={"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}),
     dcc.Store(id="gbp-poses", data=None),
     dcc.Interval(id="gbp-interval", interval=200, n_intervals=0, disabled=True),
+
+    # ✅ 新增的 V Cycle 控制
+    dcc.Store(id="vcycle-state", data={"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}),
+    dcc.Interval(id="vcycle-interval", interval=500, n_intervals=0, disabled=True),
 
     cyto.Cytoscape(
         id="cytoscape",
@@ -959,7 +1318,6 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             abs_nodes, abs_edges = copy_to_abs(last["nodes"], last["edges"], abs_layer_idx)
 
             # Ensure super graph has run at least once
-            layers[-1]["graph"].synchronous_iteration()  
             layers[-1]["graph"].synchronous_iteration() 
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
@@ -971,6 +1329,8 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                 super_nodes, super_edges, node_map = fuse_to_super_grid(last["nodes"], last["edges"], int(gx or 2), int(gy or 2), super_layer_idx)
             else:
                 super_nodes, super_edges, node_map = fuse_to_super_kmeans(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
+            # Ensure super graph has run at least once
+            layers[-1]["graph"].synchronous_iteration() 
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
             layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
@@ -990,8 +1350,9 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
     Input("layer-select","options"),
     Input("gbp-poses","data"),
     Input("show-number","value"),
+    State("param-N","value"),
 )
-def update_layer(layer_name, _options, gbp_poses, show_number):
+def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
     # 找到当前 layer
     layer = next((l for l in layers if l["name"] == layer_name), None)
     if layer is None:
@@ -1029,7 +1390,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number):
         size_linear = 4
 
         # ==== 对数缩放半径 ====
-        size_val = float(size_linear * (np.log(1 + nb) / np.log(4)))
+        size_val = float(size_linear * (np.log(1 + nb*500/param_N) / np.log(4)))
         new_n["data"]["size_val"] = size_val
 
         nodes.append(new_n)
@@ -1091,112 +1452,131 @@ def update_layer(layer_name, _options, gbp_poses, show_number):
 # -----------------------
 from dash import no_update
 
+
 @app.callback(
     Output("gbp-poses", "data"),
     Output("gbp-status", "children"),
     Output("gbp-state", "data"),
     Output("gbp-interval", "disabled"),
     Output("gbp-interval", "n_intervals"),
+    Output("vcycle-status", "children"),
+    Output("vcycle-state", "data"),
+    Output("vcycle-interval", "disabled"),
+    Output("vcycle-interval", "n_intervals"),
     Input("gbp-run", "n_clicks"),
     Input("gbp-interval", "n_intervals"),
-    Input("new-graph", "n_clicks"),           # ← 新增：监听 New Graph
+    Input("vcycle-run", "n_clicks"),
+    Input("vcycle-interval", "n_intervals"),
+    Input("new-graph", "n_clicks"),   # ✅ 统一急停
     State("gbp-state", "data"),
+    State("vcycle-state", "data"),
     State("param-iters","value"),
     State("param-snap","value"),
-    State("layer-select", "value"),   # 新增
+    State("layer-select","value"),
     prevent_initial_call=True
 )
 
-def gbp_unified(run_clicks, interval_ticks, new_graph_clicks,
-                state, iters, snap_int, current_layer):
+
+def unified_solver(gbp_click, gbp_ticks,
+                   vcycle_click, vcycle_ticks,
+                   new_graph_click,
+                   gbp_state, vcycle_state,
+                   iters, snap_int, current_layer):
+
     ctx = dash.callback_context
     if not ctx.triggered:
-        return no_update, no_update, no_update, True, no_update
+        return no_update, no_update, gbp_state, True, no_update, \
+               no_update, vcycle_state, True, no_update
 
     trig = ctx.triggered[0]["prop_id"]
 
-    # 找到当前选中的 layer 的 graph
-    layer = next((L for L in layers if L["name"] == current_layer), None)
-    graph = layer.get("graph", None) if layer else None
-
-    # 1) New Graph 触发：立刻急停并复位可视化相关状态
+    # ==== Reset when new graph ====
     if trig.startswith("new-graph"):
-        if not isinstance(state, dict):
-            state = {}
-        snap_keep = state.get("snap_int", 5)
-        reset_state = {"running": False, "iters_done": 0, "iters_total": 0, "snap_int": snap_keep}
-        return None, "Ready. New graph created and previous solver stopped.", reset_state, True, 0
+        reset_state = {"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}
+        return None, "Ready. New graph created.", reset_state, True, 0, \
+               "", reset_state, True, 0
 
-
-    # 2) 点按钮：初始化并启动 interval
+    # ==== GBP Solver ====
     if trig.startswith("gbp-run"):
+        graph = next((L.get("graph") for L in layers if L["name"] == current_layer), None)
         if graph is None:
-            return no_update, f"No factor graph yet in {current_layer}.", no_update, True, no_update
+            return no_update, f"No factor graph in {current_layer}.", gbp_state, True, no_update, \
+                   no_update, vcycle_state, True, no_update
         iters = int(iters or 50)
         snap_int = int(snap_int or 5)
-        state = {"running": True, "iters_done": 0, "iters_total": iters, "snap_int": snap_int}
-        status = f"GBP running on {current_layer}... 0 / {iters}"
-        return no_update, status, state, False, 0
+        gbp_state = {"running": True, "iters_done": 0, "iters_total": iters, "snap_int": snap_int}
+        return no_update, f"GBP running... 0/{iters}", gbp_state, False, 0, \
+               no_update, vcycle_state, True, no_update
 
-    # 3) interval 驱动：做一批迭代
-    if not state or not state.get("running") or graph is None:
-        return no_update, no_update, state, True, no_update
+    if trig.startswith("gbp-interval"):
+        if not gbp_state or not gbp_state.get("running"):
+            return no_update, no_update, gbp_state, True, no_update, \
+                   no_update, vcycle_state, True, no_update
 
-    iters_done  = int(state["iters_done"])
-    iters_total = int(state["iters_total"])
-    snap_int    = int(state["snap_int"])
-    remaining = iters_total - iters_done
-    batch = max(1, min(snap_int, remaining))
+        graph = next((L.get("graph") for L in layers if L["name"] == current_layer), None)
+        if graph is None:
+            return no_update, no_update, gbp_state, True, no_update, \
+                   no_update, vcycle_state, True, no_update
 
-    for _ in range(batch):
-        graph.synchronous_iteration()
+        iters_done = gbp_state["iters_done"]
+        iters_total = gbp_state["iters_total"]
+        snap_int = gbp_state["snap_int"]
+        batch = max(1, min(snap_int, iters_total - iters_done))
 
-    latest_positions = {}
+        for _ in range(batch):
+            graph.synchronous_iteration()
 
-    for v in graph.var_nodes:
-        dim = v.dofs
+        refresh_gbp_results(layers)
+        latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]
 
-        # --- base graph: 2D ---
-        if current_layer.startswith("base"):
-            pos = v.mu[:2]
+        iters_done += batch
+        gbp_state["iters_done"] = iters_done
+        finished = iters_done >= iters_total
+        gbp_state["running"] = not finished
 
-        # --- super graph: 2kD, k>=2 ---
-        elif current_layer.startswith("super"):
-            pts = v.mu.reshape(-1, 2)
-            pos = pts.mean(axis=0)
+        status = (f"GBP running {iters_done}/{iters_total}"
+                  if not finished else f"GBP finished {iters_total} iters.")
+        return latest_positions, status, gbp_state, finished, no_update, \
+               no_update, vcycle_state, True, no_update
 
-        # --- abs graph: reduced dim, need to lift back ---
-        elif current_layer.startswith("abs"):
-            # 找到对应的投影矩阵 B 和 偏移 k
-            aid = v.variableID
-            B = layer.get("Bs", {}).get(aid, None)
-            k = layer.get("ks", {}).get(aid, None)
+    # ==== V Cycle ====
+    if trig.startswith("vcycle-run"):
+        iters = int(iters or 20)
+        snap_int = int(snap_int or 5)
+        vcycle_state = {"running": True, "iters_done": 0, "iters_total": iters, "snap_int": snap_int}
+        return no_update, no_update, gbp_state, True, no_update, \
+               f"V Cycle running... 0/{iters}", vcycle_state, False, 0
 
-            lifted = B @ v.mu + k  # 回到高维
-            pts = lifted.reshape(-1, 2)
-            pos = pts.mean(axis=0)
+    if trig.startswith("vcycle-interval"):
+        if not vcycle_state or not vcycle_state.get("running"):
+            return no_update, no_update, gbp_state, True, no_update, \
+                   no_update, vcycle_state, True, no_update
 
-        latest_positions[str(v.variableID)] = pos.tolist()
-    
+        iters_done = vcycle_state["iters_done"]
+        iters_total = vcycle_state["iters_total"]
+        snap_int = vcycle_state["snap_int"]
+        batch = max(1, min(snap_int, iters_total - iters_done))
 
-    # 保存到对应 layer
-    layer["gbp_result"] = latest_positions
+        for _ in range(batch):
+            vloop(layers)   # ✅ 调用你定义的 vloop()
 
-    iters_done += batch
-    state["iters_done"] = iters_done
-    finished = (iters_done >= iters_total)
-    state["running"] = (not finished)
+        refresh_gbp_results(layers)
+        latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]
 
-    # 暂时去掉 energy_map，避免 abs 层报错
-    # e = getattr(graph, "energy_map")(include_priors=True, include_factors=True)
-    # energy_txt = f", energy {e:.6f}"
-    energy_txt = ""
 
-    status = (f"GBP running on {current_layer}... {iters_done} / {iters_total}{energy_txt}"
-              if not finished
-              else f"GBP finished {iters_total} iterations on {current_layer}{energy_txt}.")
+        iters_done += batch
+        vcycle_state["iters_done"] = iters_done
+        finished = iters_done >= iters_total
+        vcycle_state["running"] = not finished
 
-    return latest_positions, status, state, finished, no_update
+        status = (f"V Cycle running {iters_done}/{iters_total}"
+                  if not finished else f"V Cycle finished {iters_total} iters.")
+        return latest_positions, no_update, gbp_state, True, no_update, \
+               status, vcycle_state, finished, no_update
+
+    return no_update, no_update, gbp_state, True, no_update, \
+           no_update, vcycle_state, True, no_update
+
 
 
 
