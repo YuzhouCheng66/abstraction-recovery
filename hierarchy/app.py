@@ -719,6 +719,117 @@ def refresh_gbp_results(layers):
 
 
 
+def refresh_gbp_results(layers):
+    """
+    为每层预计算到 base 平面的仿射映射:
+      base:   A_i = I2, b_i = 0
+      super:  A_s = (1/m) [A_c1, A_c2, ..., A_cm], b_s = (1/m) Σ b_cj
+      abs:    A_a = A_super(s) @ B_s,             b_a = A_super(s) @ k_s + b_super(s)
+    然后用 pos = A @ mu + b 刷新 gbp_result。
+    约定：所有键一律用字符串（与 Cytoscape id 对齐）。
+    """
+    if not layers:
+        return
+
+    # ---------- 1) 自底向上，计算每层 A,b ----------
+    for li, L in enumerate(layers):
+        g = L.get("graph")
+        if g is None:
+            L.pop("A", None); L.pop("b", None); L.pop("gbp_result", None)
+            continue
+
+        name = L["name"]
+        # ---- base ----
+        if name.startswith("base"):
+            L["A"], L["b"] = {}, {}
+            for v in g.var_nodes:
+                key = str(v.variableID)
+                L["A"][key] = np.eye(2)
+                L["b"][key] = np.zeros(2, dtype=float)
+
+        # ---- super ----
+        elif name.startswith("super"):
+            parent = layers[li - 1]
+            node_map = L["node_map"]  # { prev_id(str) -> super_id(str) }
+
+            # 分组（保持插入顺序，确保和 build_super_graph 拼接顺序一致）
+            groups = {}
+            for prev_id, s_id in node_map.items():
+                prev_id = str(prev_id); s_id = str(s_id)
+                groups.setdefault(s_id, []).append(prev_id)
+
+            L["A"], L["b"] = {}, {}
+            for s_id, children in groups.items():
+                m = len(children)
+                # 横向拼接 [A_c1, A_c2, ...]
+                A_blocks = [parent["A"][cid] for cid in children]  # 每块形状 2×d_c
+                A_concat = np.hstack(A_blocks) if A_blocks else np.zeros((2, 0))
+                b_sum = sum((parent["b"][cid] for cid in children), start=np.zeros(2, dtype=float))
+                L["A"][s_id] = (1.0 / m) * A_concat
+                L["b"][s_id] = (1.0 / m) * b_sum
+
+        # ---- abs ----
+        elif name.startswith("abs"):
+            parent = layers[li - 1]  # 对应的 super 层
+            Bs, ks = L["Bs"], L["ks"]  # 注意：键是 super 的 variableID (int)
+
+            # 建一个 super 变量ID(int) <-> super 字符串 id 的映射（按节点列表顺序）
+            # 父层(super)与本层(abs)的 nodes 顺序是一致的（copy_to_abs 保持顺序）
+            int2sid = {i: str(parent["nodes"][i]["data"]["id"]) for i in range(len(parent["nodes"]))}
+
+            L["A"], L["b"] = {}, {}
+            for av in g.var_nodes:
+                sid_int = av.variableID          # super 的 variableID (int)
+                s_id = int2sid.get(sid_int, str(sid_int))  # super 的字符串 id（同时也是 abs 节点 id）
+                B = Bs[sid_int]                   # (sum d_c) × r
+                k = ks[sid_int]                   # (sum d_c,)
+
+                A_sup = parent["A"][s_id]         # 形状 2 × (sum d_c)
+                b_sup = parent["b"][s_id]         # 形状 (2,)
+
+                L["A"][s_id] = A_sup @ B          # 2 × r
+                L["b"][s_id] = A_sup @ k + b_sup  # 2,
+
+        else:
+            # 未知层类型
+            L["A"], L["b"] = {}, {}
+
+    # ---------- 2) 计算 gbp_result ----------
+    for li, L in enumerate(layers):
+        g = L.get("graph")
+        if g is None:
+            L.pop("gbp_result", None)
+            continue
+
+        name = L["name"]
+        res = {}
+
+        if name.startswith("base"):
+            for v in g.var_nodes:
+                vid = str(v.variableID)
+                res[vid] = v.mu[:2].tolist()
+
+        elif name.startswith("super"):
+            # 直接用 A_super, b_super 映射
+            # nodes 顺序与 var_nodes 顺序一致
+            for i, v in enumerate(g.var_nodes):
+                s_id = str(L["nodes"][i]["data"]["id"])
+                A, b = L["A"][s_id], L["b"][s_id]   # A: 2×(sum d_c)
+                res[s_id] = (A @ v.mu + b).tolist()
+
+        elif name.startswith("abs"):
+            parent = layers[li - 1]
+            # 同样用字符串 id 对齐
+            for i, v in enumerate(g.var_nodes):
+                a_id = str(L["nodes"][i]["data"]["id"])  # 与 super 的 s_id 相同文本
+                A, b = L["A"][a_id], L["b"][a_id]        # A: 2×r
+                res[a_id] = (A @ v.mu + b).tolist()
+
+        L["gbp_result"] = res
+
+
+
+
 def build_abs_graph(
     layers,
     r_reduced = 2):
@@ -847,111 +958,6 @@ def build_abs_graph(
 
 
     return abs_fg, Bs, ks
-
-
-def vloop(layers):
-    """
-    执行一个 V-cycle（不新增层，只在已有层之间重建/传递）：
-    1) bottom-up：从 base → ... → 顶层
-       - 每层先迭代一次
-       - 如果下一层是 super：用当前层最新 belief 重建该 super graph
-       - 如果下一层是 abs  ：用当前 super 的最新 belief 重建该 abs graph（并刷新 Bs/ks）
-    2) top-down：从顶层 → ... → base
-       - 每层先迭代一次
-       - abs → super：用 Bs/ks 把抽象均值提升回 super
-       - super → prev：按 node_map 分块把均值拆回下层（保持构图时的顺序与维度）
-    最后：为所有层刷新 gbp_result（用于 UI）
-    """
-
-    # -------- 1) bottom-up --------
-    for idx, L in enumerate(layers):
-        # 确保当前层有 graph（base 在 new-graph 时就已经建好）
-        g = L.get("graph", None)
-        if g is not None:
-            g.synchronous_iteration()
-
-        # 如果有“下一层”，根据类型重建它的 graph
-        if idx + 1 < len(layers):
-            nxt = layers[idx + 1]
-
-            if nxt["name"].startswith("super"):
-                # 用当前层（idx）为“基”，重建 super[idx+1]
-                # build_super_graph 约定：layers[-2] 是“基层”，layers[-1] 是待建的 super 层
-                # 所以传切片，保证相对位置正确
-                nxt["graph"] = build_super_graph(layers[:idx + 2])
-
-            elif nxt["name"].startswith("abs"):
-                # 用当前 super（idx）为“基”，重建 abs[idx+1] 并更新 Bs/ks
-                abs_graph, Bs, ks = build_abs_graph(layers[:idx + 2], r_reduced=2)
-                nxt["graph"] = abs_graph
-                nxt["Bs"] = Bs
-                nxt["ks"] = ks
-
-    # -------- 2) top-down --------
-    for idx in range(len(layers) - 1, 0, -1):
-        L = layers[idx]
-        prevL = layers[idx - 1]
-        g = L.get("graph", None)
-        if g is not None:
-            g.synchronous_iteration()
-
-        # abs → super：用 Bs/ks 把抽象均值提升回 super
-        if L["name"].startswith("abs"):
-            sup_g = prevL["graph"]
-            Bs = L.get("Bs", {})
-            ks = L.get("ks", {})
-            if sup_g is None:
-                # 保险：如果 super 的图还没建（理论上 bottom-up 已经建了）
-                prevL["graph"] = build_super_graph(layers[:idx + 1])
-                sup_g = prevL["graph"]
-
-            for av in L["graph"].var_nodes:
-                sid = av.variableID                 # 注意：abs 的 variableID == super 的 variableID（整数）
-                B = Bs[sid]
-                k = ks[sid]
-                lifted = B @ av.mu + k
-                sup_g.var_nodes[sid].mu = lifted
-
-            sup_g.synchronous_iteration()
-
-        # super → prev（base 或 abs 之下的层）：按 node_map 把均值分块拆回
-        elif L["name"].startswith("super"):
-            super_g = L["graph"]
-            prev_g = prevL["graph"]
-            node_map = L.get("node_map", {})
-
-            if prev_g is None:
-                # 保险：如果下层图没建，按类型补建
-                if prevL["name"].startswith("abs"):
-                    ag, Bs, ks = build_abs_graph(layers[:idx], r_reduced=2)
-                    prevL["graph"], prevL["Bs"], prevL["ks"] = ag, Bs, ks
-                else:
-                    prevL["graph"] = prev_g = layers[0]["graph"]
-            prev_g = prevL["graph"]
-
-            # super 的字符串 id -> super 图里的整数 variableID
-            sid2idx = {sn["data"]["id"]: i for i, sn in enumerate(L["nodes"])}
-
-            # 收集每个 super 节点的子节点（保持 node_map 的插入顺序）
-            groups = {}
-            for b_str, s_str in node_map.items():
-                groups.setdefault(s_str, []).append(int(b_str))
-
-            # 把 super 的 mu 按块写回下层
-            for s_str, b_ids in groups.items():
-                s_idx = sid2idx[s_str]            # super 的整数 variableID（与 var_nodes 索引一致）
-                sv = super_g.var_nodes[s_idx]
-                off = 0
-                for bid in b_ids:
-                    d = prev_g.var_nodes[bid].dofs
-                    prev_g.var_nodes[bid].mu = sv.mu[off:off + d].copy()
-                    off += d
-
-            prev_g.synchronous_iteration()
-
-    # -------- 3) 刷新所有层的 gbp_result（用于 UI） --------
-    for L in layers:
-        g = L.get("graph", None)
 
 
 
@@ -1175,6 +1181,8 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         layers = layers[:idx+1]
         last = layers[-1]
         kind, k = parse_layer_name(last["name"])
+
+        
         pair_idx = highest_pair_idx([L["name"] for L in layers])
         if kind == "super":
             abs_layer_idx = k*2
