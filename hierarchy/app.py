@@ -895,12 +895,12 @@ def bottom_up_modify_super_graph(layers):
             v.belief = new_belief
 
 
+            """
             # 3. update adj_beliefs and messages
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
                 d_eta = new_belief.eta - old_belief.eta
                 d_lam = new_belief.lam - old_belief.lam
-                print(d_lam)
                 for f in v.adj_factors:
                     if v in f.adj_var_nodes:
                         idx_in_factor = f.adj_var_nodes.index(v)
@@ -911,6 +911,7 @@ def bottom_up_modify_super_graph(layers):
                         msg.eta += d_eta / n_adj
                         msg.lam += d_lam / n_adj
                         f.messages[idx_in_factor] = msg
+            """
 
 def top_down_modify_super_graph(layers):
     return
@@ -936,6 +937,7 @@ def top_down_modify_base_and_abs_graph(layers):
     # child lookup
     id2var_base = {vn.variableID: vn for vn in base_graph.var_nodes}
 
+    a = 0
     for s_var in super_graph.var_nodes:
         sid = str(s_var.variableID)
         if sid not in super_groups:
@@ -962,11 +964,15 @@ def top_down_modify_base_and_abs_graph(layers):
             new_belief = NdimGaussian(v.dofs, eta, lam)
             v.belief = new_belief
 
+            """
             # 3. 同步到相邻 factor
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
                 d_eta = new_belief.eta - old_belief.eta
                 d_lam = new_belief.lam - old_belief.lam
+
+                if np.linalg.norm(d_lam) > 0:
+                    a +=1
                 for f in v.adj_factors:
                     if v in f.adj_var_nodes:
                         idx = f.adj_var_nodes.index(v)
@@ -977,7 +983,9 @@ def top_down_modify_base_and_abs_graph(layers):
                         msg.eta += d_eta / n_adj
                         msg.lam += d_lam / n_adj
                         f.messages[idx] = msg
-
+            """
+            
+    #print("Corrected base messages:", a)
     return base_graph
 
 
