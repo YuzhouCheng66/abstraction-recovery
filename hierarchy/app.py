@@ -431,7 +431,6 @@ def build_noisy_pose_graph(
     return fg
 
 
-
 def build_super_graph(layers):
     """
     基于 layers[-2] 的 base graph, 和 layers[-1] 的 super 分组，构造 super graph。
@@ -681,41 +680,232 @@ def build_super_graph(layers):
     return fg
 
 
-def refresh_gbp_results(layers):
+
+def build_abs_graph(
+    layers,
+    r_reduced = 2):
+
+    abs_var_nodes = {}
+    Bs = {}
+    ks = {}
+    r = 2
+
+    # === 1. Build Abstraction Variables ===
+    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    sup_fg = layers[-2]["graph"]
+
+    for sn in sup_fg.var_nodes:
+        if sn.dofs <= r:
+            r = sn.dofs  # No reduction if dofs already <= r
+        else:
+            r = r_reduced
+
+        sid = sn.variableID
+        varis_sup_mu = sn.mu
+        varis_sup_sigma = sn.Sigma
+        
+        # Step 1: Eigen decomposition of the covariance matrix
+        eigvals, eigvecs = np.linalg.eigh(varis_sup_sigma)
+
+        # Step 2: Sort eigenvalues and eigenvectors in descending order of eigenvalues
+        idx = np.argsort(eigvals)[::-1]      # Get indices of sorted eigenvalues (largest first)
+        eigvals = eigvals[idx]               # Reorder eigenvalues
+        eigvecs = eigvecs[:, idx]            # Reorder corresponding eigenvectors
+
+        # Step 3: Select the top-k eigenvectors to form the projection matrix (principal subspace)
+        B_reduced = eigvecs[:, :r]                 # B_reduced: shape (sup_dof, r), projects r to sup_dof
+        Bs[sid] = B_reduced                        # Store the projection matrix for this variable
+
+        # Step 4: Project eta and Lam onto the reduced 2D subspace
+        varis_abs_mu = B_reduced.T @ varis_sup_mu          # Projected natural mean: shape (2,)
+        varis_abs_sigma = B_reduced.T @ varis_sup_sigma @ B_reduced  # Projected covariance: shape (2, 2)
+        ks[sid] = varis_sup_mu - B_reduced @ varis_abs_mu  # Store the offset for this variable
+
+
+        varis_abs_lam = np.linalg.inv(varis_abs_sigma)  # Inverse covariance (precision matrix): shape (2, 2)
+        varis_abs_eta = varis_abs_lam @ varis_abs_mu  # Natural parameters: shape (2,)
+
+        v = VariableNode(sid, dofs=r)
+        v.GT = sn.GT
+        v.prior.lam = 1e-10 * np.eye(r, dtype=float)
+        v.prior.eta = np.zeros(r, dtype=float)
+        v.mu = varis_abs_mu
+        v.Sigma = varis_abs_sigma
+        v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
+
+        abs_var_nodes[sid] = v
+        abs_fg.var_nodes.append(v)
+    abs_fg.n_var_nodes = len(abs_fg.var_nodes)
+
+
+    # === 2. Abstract Prior ===
+    def make_abs_prior_factor(sup_factor):
+        abs_id = sup_factor.adj_var_nodes[0].variableID
+        B = Bs[abs_id]
+        k = ks[abs_id]
+
+        def meas_fn_abs_prior(x_abs, *args):
+            return sup_factor.meas_fn(B @ x_abs + k)
+        
+        def jac_fn_abs_prior(x_abs, *args):
+            return sup_factor.jac_fn(B @ x_abs + k) @ B
+
+
+        return meas_fn_abs_prior, jac_fn_abs_prior, sup_factor.measurement, sup_factor.measurement_lambda
+    
+
+
+    # === 3. Abstract Between ===
+    def make_abs_between_factor(sup_factor):
+        vids = [v.variableID for v in sup_factor.adj_var_nodes]
+        i, j = vids # two variable IDs
+        ni = abs_var_nodes[i].dofs
+        Bi, Bj = Bs[i], Bs[j]
+        ki, kj = ks[i], ks[j]                       
+    
+
+        def meas_fn_super_between(xij, *args):
+            xi, xj = xij[:ni], xij[ni:]
+            return sup_factor.meas_fn(np.concatenate([Bi @ xi + ki, Bj @ xj + kj]))
+
+        def jac_fn_super_between(xij, *args):
+            xi, xj = xij[:ni], xij[ni:]
+            J_sup = sup_factor.jac_fn(np.concatenate([Bi @ xi + ki, Bj @ xj + kj]))
+            J_abs = np.zeros((J_sup.shape[0], ni + xj.shape[0]))
+            J_abs[:, :ni] = J_sup[:, :Bi.shape[0]] @ Bi
+            J_abs[:, ni:] = J_sup[:, Bi.shape[0]:] @ Bj
+            return J_abs
+        
+        return meas_fn_super_between, jac_fn_super_between, sup_factor.measurement, sup_factor.measurement_lambda
+    
+
+    def project_msg(msg, B):
+        # super msg -> abs msg ： Lam_a = B^T Lam_s B,  Eta_a = B^T Eta_s
+        Lam_a = B.T @ msg.lam @ B
+        Eta_a = B.T @ msg.eta
+        return Eta_a, Lam_a
+
+    for f in sup_fg.factors:
+        if len(f.adj_var_nodes) == 1:
+            meas_fn, jac_fn, z, z_lambda = make_abs_prior_factor(f)
+            v = abs_var_nodes[f.adj_var_nodes[0].variableID]
+            abs_f = Factor(f.factorID, [v], z, z_lambda, meas_fn, jac_fn)
+            abs_f.type = "abs_prior"
+            abs_f.adj_beliefs = [v.belief]
+
+            lin0 = v.mu
+            abs_f.compute_factor(linpoint=lin0, update_self=True)
+
+            # 处理让messages也一致
+            sv = f.adj_var_nodes[0]     # super 变量
+            s_msg = f.messages[0]       # super -> var 的旧消息（索引 0）
+            if s_msg is not None:
+                sid = sv.variableID
+                B = Bs[sid]
+                eta_a, lam_a = project_msg(s_msg, B)
+                # 直接写到 abs_f.messages[0]
+                abs_f.messages[0].eta = eta_a.copy()
+                abs_f.messages[0].lam = lam_a.copy()
+
+
+            abs_fg.factors.append(abs_f)
+            v.adj_factors.append(abs_f)
+
+        elif len(f.adj_var_nodes) == 2:
+            meas_fn, jac_fn, z, z_lambda = make_abs_between_factor(f)
+            i, j = [v.variableID for v in f.adj_var_nodes]
+            vi, vj = abs_var_nodes[i], abs_var_nodes[j]
+            abs_f = Factor(f.factorID, [vi, vj], z, z_lambda, meas_fn, jac_fn)
+            abs_f.type = "abs_between"
+            abs_f.adj_beliefs = [vi.belief, vj.belief]
+
+            lin0 = np.concatenate([vi.mu, vj.mu])
+            abs_f.compute_factor(linpoint=lin0, update_self=True)
+
+            sv_i, sv_j = f.adj_var_nodes   # super 两端变量
+            # super 的消息按同样的索引顺序存着：f.messages[0] 对应 sv_i，f.messages[1] 对应 sv_j
+            s_msg_i = f.messages[0]
+            s_msg_j = f.messages[1]
+            # i 端
+            if s_msg_i is not None:
+                si = sv_i.variableID
+                Bi = Bs[si]
+                eta_ai, lam_ai = project_msg(s_msg_i, Bi)
+                abs_f.messages[0].eta = eta_ai.copy()
+                abs_f.messages[0].lam = lam_ai.copy()
+            # j 端
+            if s_msg_j is not None:
+                sj = sv_j.variableID
+                Bj = Bs[sj]
+                eta_aj, lam_aj = project_msg(s_msg_j, Bj)
+                abs_f.messages[1].eta = eta_aj.copy()
+                abs_f.messages[1].lam = lam_aj.copy()
+
+            abs_fg.factors.append(abs_f)
+            vi.adj_factors.append(abs_f)
+            vj.adj_factors.append(abs_f)
+
+    abs_fg.n_factor_nodes = len(abs_fg.factors)
+
+
+    return abs_fg, Bs, ks
+
+
+def bottom_up_modify_super_graph(layers):
     """
-    遍历所有层，为每一层单独生成 gbp_result (dict: node_id -> [x,y])。
-    - base 层：直接取 mu[:2]
-    - super 层：用 node['data']['id'] 对齐
-    - abs 层：key 用 "a{idx}"，和 copy_to_abs 的 id 对齐
+    用 base 节点更新 super 节点的均值 (mu)，
+    并同步修正 variable belief 与相邻 message。
     """
-    for L in layers:
-        g = L.get("graph", None)
-        if g is None:
-            L.pop("gbp_result", None)
-            continue
+    base_graph = layers[-2]["graph"]
+    super_graph = layers[-1]["graph"]
+    node_map = layers[-1]["node_map"]
 
-        res = {}
-        if L["name"].startswith("base"):
-            for v in g.var_nodes:
-                res[str(v.variableID)] = v.mu[:2].tolist()
+    id2var = {vn.variableID: vn for vn in base_graph.var_nodes}
 
-        elif L["name"].startswith("super"):
-            # ⚠️ super 用 node 的真实 id（通常是 "0","1",...）
-            for idx, v in enumerate(g.var_nodes):
-                pts = v.mu.reshape(-1, 2)
-                node_id = L["nodes"][idx]["data"]["id"]   # 保持一致
-                res[node_id] = pts.mean(axis=0).tolist()
+    super_groups = {}
+    for b_str, s_id in node_map.items():
+        b_int = int(b_str)
+        super_groups.setdefault(s_id, []).append(b_int)
 
-        elif L["name"].startswith("abs"):
-            Bs, ks = L.get("Bs", {}), L.get("ks", {})
-            for idx, av in enumerate(g.var_nodes):
-                sid = av.variableID
-                lifted = Bs[sid] @ av.mu + ks[sid]
-                pts = lifted.reshape(-1, 2)
-                node_id = L["nodes"][idx]["data"]["id"]   # copy_to_abs 已经是 "a0","a1"
-                res[node_id] = pts.mean(axis=0).tolist()
+    sid2idx = {sn["data"]["id"]: i for i, sn in enumerate(layers[-1]["nodes"])}
 
-        L["gbp_result"] = res
+    for sid, group in super_groups.items():
+        mu_blocks = [id2var[bid].mu for bid in group]
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(0)
+
+        if sid in sid2idx:
+            idx = sid2idx[sid]
+            v = super_graph.var_nodes[idx]
+
+            # 旧的 belief
+            old_belief = v.belief
+
+            # 1. 更新 mu
+            v.mu = mu_super
+
+            # 2. 新 belief（用旧 Sigma + 新 mu）
+            lam = np.linalg.inv(v.Sigma)
+            eta = lam @ v.mu
+            new_belief = NdimGaussian(v.dofs, eta, lam)
+            v.belief = new_belief
+
+            # 3. 修正相邻 message
+            if v.adj_factors:
+                n_adj = len(v.adj_factors)
+                d_eta = new_belief.eta - old_belief.eta
+                d_lam = new_belief.lam - old_belief.lam
+                for f in v.adj_factors:
+                    # 找到 f -> v 的 message
+                    msg = f.messages.get(v, None)
+                    if msg is None:
+                        continue
+                    msg.eta += d_eta / n_adj
+                    msg.lam += d_lam / n_adj
+                    f.messages[v] = msg
+
+
+def top_down_modify_super_graph(layers):
+    return
 
 
 
@@ -826,138 +1016,6 @@ def refresh_gbp_results(layers):
                 res[a_id] = (A @ v.mu + b).tolist()
 
         L["gbp_result"] = res
-
-
-
-
-def build_abs_graph(
-    layers,
-    r_reduced = 2):
-
-    abs_var_nodes = {}
-    Bs = {}
-    ks = {}
-    r = 2
-
-    # === 1. Build Abstraction Variables ===
-    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
-    sup_fg = layers[-2]["graph"]
-
-    for sn in sup_fg.var_nodes:
-        if sn.dofs <= r:
-            r = sn.dofs  # No reduction if dofs already <= r
-        else:
-            r = r_reduced
-
-        sid = sn.variableID
-        varis_sup_mu = sn.mu
-        varis_sup_sigma = sn.Sigma
-        
-        # Step 1: Eigen decomposition of the covariance matrix
-        eigvals, eigvecs = np.linalg.eigh(varis_sup_sigma)
-
-        # Step 2: Sort eigenvalues and eigenvectors in descending order of eigenvalues
-        idx = np.argsort(eigvals)[::-1]      # Get indices of sorted eigenvalues (largest first)
-        eigvals = eigvals[idx]               # Reorder eigenvalues
-        eigvecs = eigvecs[:, idx]            # Reorder corresponding eigenvectors
-
-        # Step 3: Select the top-k eigenvectors to form the projection matrix (principal subspace)
-        B_reduced = eigvecs[:, :r]                 # B_reduced: shape (sup_dof, r), projects r to sup_dof
-        Bs[sid] = B_reduced                        # Store the projection matrix for this variable
-
-        # Step 4: Project eta and Lam onto the reduced 2D subspace
-        varis_abs_mu = B_reduced.T @ varis_sup_mu          # Projected natural mean: shape (2,)
-        varis_abs_sigma = B_reduced.T @ varis_sup_sigma @ B_reduced  # Projected covariance: shape (2, 2)
-        ks[sid] = varis_sup_mu - B_reduced @ varis_abs_mu  # Store the offset for this variable
-
-
-        varis_abs_lam = np.linalg.inv(varis_abs_sigma)  # Inverse covariance (precision matrix): shape (2, 2)
-        varis_abs_eta = varis_abs_lam @ varis_abs_mu  # Natural parameters: shape (2,)
-
-        v = VariableNode(sid, dofs=r)
-        v.GT = sn.GT
-        v.prior.lam = 1e-10 * np.eye(r, dtype=float)
-        v.prior.eta = np.zeros(r, dtype=float)
-        v.mu = varis_abs_mu
-        v.Sigma = varis_abs_sigma
-        v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
-
-        abs_var_nodes[sid] = v
-        abs_fg.var_nodes.append(v)
-    abs_fg.n_var_nodes = len(abs_fg.var_nodes)
-
-
-    # === 2. Abstract Prior ===
-    def make_abs_prior_factor(sup_factor):
-        abs_id = sup_factor.adj_var_nodes[0].variableID
-        B = Bs[abs_id]
-        k = ks[abs_id]
-
-        def meas_fn_abs_prior(x_abs, *args):
-            return sup_factor.meas_fn(B @ x_abs + k)
-        
-        def jac_fn_abs_prior(x_abs, *args):
-            return sup_factor.jac_fn(B @ x_abs + k) @ B
-
-
-        return meas_fn_abs_prior, jac_fn_abs_prior, sup_factor.measurement, sup_factor.measurement_lambda
-    
-
-
-    # === 3. Abstract Between ===
-    def make_abs_between_factor(sup_factor):
-        vids = [v.variableID for v in sup_factor.adj_var_nodes]
-        i, j = vids # two variable IDs
-        ni = abs_var_nodes[i].dofs
-        Bi, Bj = Bs[i], Bs[j]
-        ki, kj = ks[i], ks[j]                       
-    
-
-        def meas_fn_super_between(xij, *args):
-            xi, xj = xij[:ni], xij[ni:]
-            return sup_factor.meas_fn(np.concatenate([Bi @ xi + ki, Bj @ xj + kj]))
-
-        def jac_fn_super_between(xij, *args):
-            xi, xj = xij[:ni], xij[ni:]
-            J_sup = sup_factor.jac_fn(np.concatenate([Bi @ xi + ki, Bj @ xj + kj]))
-            J_abs = np.zeros((J_sup.shape[0], ni + xj.shape[0]))
-            J_abs[:, :ni] = J_sup[:, :Bi.shape[0]] @ Bi
-            J_abs[:, ni:] = J_sup[:, Bi.shape[0]:] @ Bj
-            return J_abs
-        
-        return meas_fn_super_between, jac_fn_super_between, sup_factor.measurement, sup_factor.measurement_lambda
-    
-
-    for f in sup_fg.factors:
-        if len(f.adj_var_nodes) == 1:
-            meas_fn, jac_fn, z, z_lambda = make_abs_prior_factor(f)
-            v = abs_var_nodes[f.adj_var_nodes[0].variableID]
-            abs_f = Factor(f.factorID, [v], z, z_lambda, meas_fn, jac_fn)
-            abs_f.type = "abs_prior"
-            abs_f.adj_beliefs = [v.belief]
-
-            lin0 = v.mu
-            abs_f.compute_factor(linpoint=lin0, update_self=True)
-            abs_fg.factors.append(abs_f)
-            v.adj_factors.append(abs_f)
-
-        elif len(f.adj_var_nodes) == 2:
-            meas_fn, jac_fn, z, z_lambda = make_abs_between_factor(f)
-            i, j = [v.variableID for v in f.adj_var_nodes]
-            vi, vj = abs_var_nodes[i], abs_var_nodes[j]
-            abs_f = Factor(f.factorID, [vi, vj], z, z_lambda, meas_fn, jac_fn)
-            abs_f.type = "abs_between"
-            abs_f.adj_beliefs = [vi.belief, vj.belief]
-
-            lin0 = np.concatenate([vi.mu, vj.mu])
-            abs_f.compute_factor(linpoint=lin0, update_self=True)
-            abs_fg.factors.append(abs_f)
-            vi.adj_factors.append(abs_f)
-            vj.adj_factors.append(abs_f)
-    abs_fg.n_factor_nodes = len(abs_fg.factors)
-
-
-    return abs_fg, Bs, ks
 
 
 
@@ -1096,7 +1154,7 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Button("V Cycle", id="vcycle-run", n_clicks=0,
-                        style={"display":"block", "background":"#222","color":"#fff","width":"120px"})
+                        style={"display":"block", "background":"#FFA500","color":"#fff","width":"120px"})
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"flex-end", "alignItems":"center", "margin":"6px 10px"}),
 
