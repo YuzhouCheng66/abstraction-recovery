@@ -900,6 +900,7 @@ def bottom_up_modify_super_graph(layers):
                 n_adj = len(v.adj_factors)
                 d_eta = new_belief.eta - old_belief.eta
                 d_lam = new_belief.lam - old_belief.lam
+                print(d_lam)
                 for f in v.adj_factors:
                     if v in f.adj_var_nodes:
                         idx_in_factor = f.adj_var_nodes.index(v)
@@ -911,12 +912,11 @@ def bottom_up_modify_super_graph(layers):
                         msg.lam += d_lam / n_adj
                         f.messages[idx_in_factor] = msg
 
-
 def top_down_modify_super_graph(layers):
     return
 
 
-def top_down_modify_abs_and_abs_graph(layers):
+def top_down_modify_base_and_abs_graph(layers):
     """
     从 super graph 往下，把 mu 拆分给 base graph，
     并同步修正 base variable 的 belief 与相邻 factor 的 adj_beliefs / messages。
@@ -937,7 +937,7 @@ def top_down_modify_abs_and_abs_graph(layers):
     id2var_base = {vn.variableID: vn for vn in base_graph.var_nodes}
 
     for s_var in super_graph.var_nodes:
-        sid = s_var.variableID
+        sid = str(s_var.variableID)
         if sid not in super_groups:
             continue
         base_ids = super_groups[sid]
@@ -1108,7 +1108,9 @@ def vloop(layers):
         name = layers[i]["name"]
         if name.startswith("super"):
             # 用前一层的 graph 更新 super
+            # layers[i]["graph"] = build_super_graph(layers[:i+1])
             bottom_up_modify_super_graph(layers[:i+1])
+
         elif name.startswith("abs"):
             # 用前一层 super 重建 abs
             abs_graph, Bs, ks = build_abs_graph(layers[:i+1], r_reduced=2)
@@ -1124,7 +1126,7 @@ def vloop(layers):
         name = layers[i]["name"]
         if name.startswith("super"):
             # 把 super 的 mu 拆回 base
-            top_down_modify_abs_and_abs_graph(layers[:i+1])
+            top_down_modify_base_and_abs_graph(layers[:i+1])
         elif name.startswith("abs"):
             # TODO: abs -> super 的传递函数还没写，这里先跳过
             continue
