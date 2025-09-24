@@ -13,17 +13,24 @@ app.title = "Factor Graph SVD Abs&Recovery"
 # -----------------------
 # SLAM-like base graph
 # -----------------------
-def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None,):
+def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
+    if rng is None :
+        rng = np.random.default_rng()  # ✅ 确保有 RNG
+
     nodes, edges = [], []
     positions = []
     x, y = 0.0, 0.0
     positions.append((x, y))
+
+    # ✅ 固定随机：轨迹生成
     for _ in range(1, int(N)):
-        dx, dy = np.random.randn(2)
+        dx, dy = rng.standard_normal(2)  # 替换 np.random.randn
         norm = np.sqrt(dx**2 + dy**2) + 1e-6
         dx, dy = dx / norm * float(step_size), dy / norm * float(step_size)
         x, y = x + dx, y + dy
         positions.append((x, y))
+
+    # 基本顺序边
     for i, (px, py) in enumerate(positions):
         nodes.append({
             "data": {"id": f"{i}", "layer": 0, "dim": 2, "num_base": 1},
@@ -32,17 +39,17 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
 
     for i in range(int(N) - 1):
         edges.append({"data": {"source": f"{i}", "target": f"{i+1}"}})
+
+    # ✅ 固定随机：回环边
     for i in range(int(N)):
         for j in range(i + 5, int(N)):
-            if np.random.rand() < float(loop_prob):
-                xi, yi = positions[i]; xj, yj = positions[j]
-                if np.hypot(xi-xj, yi-yj) < float(loop_radius):
+            if rng.random() < float(loop_prob):  # 替换 np.random.rand
+                xi, yi = positions[i]
+                xj, yj = positions[j]
+                if np.hypot(xi - xj, yi - yj) < float(loop_radius):
                     edges.append({"data": {"source": f"{i}", "target": f"{j}"}})
 
-    # 确定强先验的节点集合
-    if rng is None:
-        rng = np.random.default_rng()
-
+    # ✅ prior 抽样也用同一个 rng
     if prior_prop <= 0.0:
         strong_ids = {0}
     elif prior_prop >= 1.0:
@@ -53,12 +60,10 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
 
     # 给 strong prior 节点加 edge
     for i in strong_ids:
-        edges.append({
-            "data": {"source": f"{i}", "target": "prior"}
-        })
-
+        edges.append({"data": {"source": f"{i}", "target": "prior"}})
 
     return nodes, edges
+
 
 # -----------------------
 # Grid 聚合
@@ -267,8 +272,8 @@ def highest_pair_idx(names):
 # -----------------------
 # 初始化 & 边界
 # -----------------------
-def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0):
-    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop)
+def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
+    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, rng)
     return [{"name": "base", "nodes": base_nodes, "edges": base_edges}]
 
 VIEW_W, VIEW_H = 960, 600
@@ -889,23 +894,91 @@ def bottom_up_modify_super_graph(layers):
             new_belief = NdimGaussian(v.dofs, eta, lam)
             v.belief = new_belief
 
-            # 3. 修正相邻 message
+
+            # 3. update adj_beliefs and messages
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
                 d_eta = new_belief.eta - old_belief.eta
                 d_lam = new_belief.lam - old_belief.lam
                 for f in v.adj_factors:
-                    # 找到 f -> v 的 message
-                    msg = f.messages.get(v, None)
-                    if msg is None:
-                        continue
-                    msg.eta += d_eta / n_adj
-                    msg.lam += d_lam / n_adj
-                    f.messages[v] = msg
+                    if v in f.adj_var_nodes:
+                        idx_in_factor = f.adj_var_nodes.index(v)
+                        # update factor's adj_belief
+                        f.adj_beliefs[idx_in_factor] = new_belief
+                        # update corresponding messages
+                        msg = f.messages[idx_in_factor]
+                        msg.eta += d_eta / n_adj
+                        msg.lam += d_lam / n_adj
+                        f.messages[idx_in_factor] = msg
 
 
 def top_down_modify_super_graph(layers):
     return
+
+
+def top_down_modify_abs_and_abs_graph(layers):
+    """
+    从 super graph 往下，把 mu 拆分给 base graph，
+    并同步修正 base variable 的 belief 与相邻 factor 的 adj_beliefs / messages。
+
+    假设 layers[-1] 是 super, layers[-2] 是 base。
+    """
+    super_graph = layers[-1]["graph"]
+    base_graph = layers[-2]["graph"]
+    node_map   = layers[-1]["node_map"]  # { base_id(str) -> super_id(str) }
+
+    # super_id -> [base_id(int)]
+    super_groups = {}
+    for b_str, s_id in node_map.items():
+        b_int = int(b_str)
+        super_groups.setdefault(s_id, []).append(b_int)
+
+    # child lookup
+    id2var_base = {vn.variableID: vn for vn in base_graph.var_nodes}
+
+    for s_var in super_graph.var_nodes:
+        sid = s_var.variableID
+        if sid not in super_groups:
+            continue
+        base_ids = super_groups[sid]
+
+        # === split super.mu to base ===
+        mu_super = s_var.mu
+        off = 0
+        for bid in base_ids:
+            v = id2var_base[bid]
+            d = v.dofs
+            mu_child = mu_super[off:off+d]
+            off += d
+
+            old_belief = v.belief
+
+            # 1. update mu
+            v.mu = mu_child
+
+            # 2. new belief（keep Σ unchanged，use new mu）
+            lam = np.linalg.inv(v.Sigma)
+            eta = lam @ v.mu
+            new_belief = NdimGaussian(v.dofs, eta, lam)
+            v.belief = new_belief
+
+            # 3. 同步到相邻 factor
+            if v.adj_factors:
+                n_adj = len(v.adj_factors)
+                d_eta = new_belief.eta - old_belief.eta
+                d_lam = new_belief.lam - old_belief.lam
+                for f in v.adj_factors:
+                    if v in f.adj_var_nodes:
+                        idx = f.adj_var_nodes.index(v)
+                        # update adj_beliefs
+                        f.adj_beliefs[idx] = new_belief
+                        # correct coresponding message
+                        msg = f.messages[idx]
+                        msg.eta += d_eta / n_adj
+                        msg.lam += d_lam / n_adj
+                        f.messages[idx] = msg
+
+    return base_graph
 
 
 
@@ -1019,12 +1092,11 @@ def refresh_gbp_results(layers):
 
 
 
-
 def vloop(layers):
     """
     简化版 V-cycle:
     1. bottom-up: base/super/abs 层依次 rebuild 并迭代一次
-    2. top-down : 暂不传回 mu (占位)
+    2. top-down : super -> base 回传 mu
     3. 每层刷新 gbp_result 供 UI 使用
     """
 
@@ -1035,8 +1107,8 @@ def vloop(layers):
     for i in range(1, len(layers)):
         name = layers[i]["name"]
         if name.startswith("super"):
-            # 用前一层的 graph 重建 super
-            layers[i]["graph"] = build_super_graph(layers[:i+1])
+            # 用前一层的 graph 更新 super
+            bottom_up_modify_super_graph(layers[:i+1])
         elif name.startswith("abs"):
             # 用前一层 super 重建 abs
             abs_graph, Bs, ks = build_abs_graph(layers[:i+1], r_reduced=2)
@@ -1047,8 +1119,18 @@ def vloop(layers):
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
 
-    # ---- top-down (占位，不传 mu) ----
-    # 目前跳过传递，仅保留迭代框架，未来可加回去
+    # ---- top-down (传 mu) ----
+    for i in range(len(layers) - 1, 0, -1):
+        name = layers[i]["name"]
+        if name.startswith("super"):
+            # 把 super 的 mu 拆回 base
+            top_down_modify_abs_and_abs_graph(layers[:i+1])
+        elif name.startswith("abs"):
+            # TODO: abs -> super 的传递函数还没写，这里先跳过
+            continue
+
+    # ---- refresh gbp_result for UI ----
+    refresh_gbp_results(layers)
 
 
 
@@ -1115,7 +1197,10 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("K:", style={"marginRight":"6px"}),
             dcc.Input(id="kmeans-k", type="number", value=128, min=1, step=1,
-                      style={"width":"100px"})
+                      style={"width":"100px", "marginRight":"12px"}),
+            html.Span("seed:", style={"marginRight":"6px"}),
+            dcc.Input(id="rand-seed", type="number", value=0, step=1,
+                  style={"width":"100px"})
         ], style={"flex":"1"}),
 
         html.Div([
@@ -1207,22 +1292,27 @@ app.layout = html.Div([
     State("prior-noise","value"),
     State("odom-noise","value"),
     State("prior-prop","value"),
+    State("rand-seed","value"),
 
     prevent_initial_call=True
 )
 def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
-                  pN, pStep, pProb, pRadius, pPrior, pOdom, pPriorProp):
+                  pN, pStep, pProb, pRadius, pPrior, pOdom, pPriorProp, seed):
     global layers, pair_idx, gbp_graph
     ctx = dash.callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
     if triggered == "new-graph":
+        if seed is None or seed == 0:
+            rng = np.random.default_rng()        # 随机初始化
+        else:
+            rng = np.random.default_rng(seed)    # 固定 seed
         N = int(pN or 100)
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
         radius = float(pRadius or 50)
         prior_prop=float(pPriorProp or 0.00)
-        layers = init_layers(N, step, prob, radius, prior_prop)
+        layers = init_layers(N, step, prob, radius, prior_prop, rng=rng)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
         # 构建 GBP 图（此时渲染仍显示 GT）
