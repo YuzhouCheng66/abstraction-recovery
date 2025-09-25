@@ -693,6 +693,7 @@ def build_abs_graph(
     abs_var_nodes = {}
     Bs = {}
     ks = {}
+    k2s = {}
     r = 2
 
     # === 1. Build Abstraction Variables ===
@@ -724,8 +725,8 @@ def build_abs_graph(
         # Step 4: Project eta and Lam onto the reduced 2D subspace
         varis_abs_mu = B_reduced.T @ varis_sup_mu          # Projected natural mean: shape (2,)
         varis_abs_sigma = B_reduced.T @ varis_sup_sigma @ B_reduced  # Projected covariance: shape (2, 2)
-        ks[sid] = varis_sup_mu - B_reduced @ varis_abs_mu  # Store the offset for this variable
-
+        ks[sid] = varis_sup_mu - B_reduced @ varis_abs_mu  # Store the mean offset for this variable
+        k2s[sid] = varis_sup_sigma - B_reduced @ varis_abs_sigma @ B_reduced.T  # Residual covariance
 
         varis_abs_lam = np.linalg.inv(varis_abs_sigma)  # Inverse covariance (precision matrix): shape (2, 2)
         varis_abs_eta = varis_abs_lam @ varis_abs_mu  # Natural parameters: shape (2,)
@@ -809,8 +810,8 @@ def build_abs_graph(
                 B = Bs[sid]
                 eta_a, lam_a = project_msg(s_msg, B)
                 # 直接写到 abs_f.messages[0]
-                abs_f.messages[0].eta = eta_a.copy()
-                abs_f.messages[0].lam = lam_a.copy()
+                #abs_f.messages[0].eta = eta_a.copy()
+                #abs_f.messages[0].lam = lam_a.copy()
 
 
             abs_fg.factors.append(abs_f)
@@ -836,15 +837,15 @@ def build_abs_graph(
                 si = sv_i.variableID
                 Bi = Bs[si]
                 eta_ai, lam_ai = project_msg(s_msg_i, Bi)
-                abs_f.messages[0].eta = eta_ai.copy()
-                abs_f.messages[0].lam = lam_ai.copy()
+                #abs_f.messages[0].eta = eta_ai.copy()
+                #abs_f.messages[0].lam = lam_ai.copy()
             # j 端
             if s_msg_j is not None:
                 sj = sv_j.variableID
                 Bj = Bs[sj]
                 eta_aj, lam_aj = project_msg(s_msg_j, Bj)
-                abs_f.messages[1].eta = eta_aj.copy()
-                abs_f.messages[1].lam = lam_aj.copy()
+                #abs_f.messages[1].eta = eta_aj.copy()
+                #abs_f.messages[1].lam = lam_aj.copy()
 
             abs_fg.factors.append(abs_f)
             vi.adj_factors.append(abs_f)
@@ -853,7 +854,7 @@ def build_abs_graph(
     abs_fg.n_factor_nodes = len(abs_fg.factors)
 
 
-    return abs_fg, Bs, ks
+    return abs_fg, Bs, ks, k2s
 
 
 def bottom_up_modify_super_graph(layers):
@@ -895,7 +896,7 @@ def bottom_up_modify_super_graph(layers):
             v.belief = new_belief
 
 
-            """
+        """
             # 3. update adj_beliefs and messages
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
@@ -911,10 +912,7 @@ def bottom_up_modify_super_graph(layers):
                         msg.eta += d_eta / n_adj
                         msg.lam += d_lam / n_adj
                         f.messages[idx_in_factor] = msg
-            """
-
-def top_down_modify_super_graph(layers):
-    return
+        """
 
 
 def top_down_modify_base_and_abs_graph(layers):
@@ -927,6 +925,7 @@ def top_down_modify_base_and_abs_graph(layers):
     super_graph = layers[-1]["graph"]
     base_graph = layers[-2]["graph"]
     node_map   = layers[-1]["node_map"]  # { base_id(str) -> super_id(str) }
+
 
     # super_id -> [base_id(int)]
     super_groups = {}
@@ -964,8 +963,8 @@ def top_down_modify_base_and_abs_graph(layers):
             new_belief = NdimGaussian(v.dofs, eta, lam)
             v.belief = new_belief
 
-            """
-            # 3. 同步到相邻 factor
+
+            # 3. 同步到相邻 factor (this step is important)
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
                 d_eta = new_belief.eta - old_belief.eta
@@ -983,11 +982,65 @@ def top_down_modify_base_and_abs_graph(layers):
                         msg.eta += d_eta / n_adj
                         msg.lam += d_lam / n_adj
                         f.messages[idx] = msg
-            """
-            
-    #print("Corrected base messages:", a)
+
     return base_graph
 
+
+def top_down_modify_super_graph(layers):
+    """
+    从 abs graph 往下，把 mu 投影回 super graph，
+    并同步修正 super variable 的 belief 与相邻 factor 的 adj_beliefs / messages。
+
+    假设 layers[-1] 是 abs, layers[-2] 是 super。
+    """
+    abs_graph = layers[-1]["graph"]
+    super_graph = layers[-2]["graph"]
+    Bs = layers[-1]["Bs"]      # { super_id(int) -> B (2 x dofs) }
+    ks = layers[-1]["ks"]      # { super_id(int) -> k }
+    k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance }
+
+    for sn in super_graph.var_nodes:
+        sid = sn.variableID
+        if sid not in Bs or sid not in ks:
+            continue
+        B = Bs[sid]
+        k = ks[sid]
+        k2 = k2s[sid]
+
+        # 1. update mu
+        mu_abs = abs_graph.var_nodes[sid].mu
+        mu_super = B @ mu_abs + k
+        #Sigma_abs = abs_graph.var_nodes[sid].Sigma
+        #Sigma_super = B @ Sigma_abs @ B.T + k2
+        sn.mu = mu_super
+        #sn.Sigma = Sigma_super
+
+        # 2. new belief (keep Σ unchanged, use new mu)
+        lam = np.linalg.inv(sn.Sigma)
+        eta = lam @ sn.mu
+        new_belief = NdimGaussian(sn.dofs, eta, lam)
+        old_belief = sn.belief
+        sn.belief = new_belief
+
+        # 3. update adj_beliefs and messages
+        if sn.adj_factors:
+            n_adj = len(sn.adj_factors)
+            d_eta = new_belief.eta - old_belief.eta
+            d_lam = new_belief.lam - old_belief.lam
+            for f in sn.adj_factors:
+                if sn in f.adj_var_nodes:
+                    idx_in_factor = f.adj_var_nodes.index(sn)
+                    # update factor's adj_belief
+                    f.adj_beliefs[idx_in_factor] = new_belief
+                    # update corresponding messages
+                    msg = f.messages[idx_in_factor]
+                    #msg.eta += d_eta / n_adj
+                    #msg.lam += d_lam / n_adj
+                    f.messages[idx_in_factor] = NdimGaussian(msg.dim)
+    super_graph.compute_all_messages()
+
+
+    return
 
 
 def refresh_gbp_results(layers):
@@ -1121,9 +1174,9 @@ def vloop(layers):
 
         elif name.startswith("abs"):
             # 用前一层 super 重建 abs
-            abs_graph, Bs, ks = build_abs_graph(layers[:i+1], r_reduced=2)
+            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=2)
             layers[i]["graph"] = abs_graph
-            layers[i]["Bs"], layers[i]["ks"] = Bs, ks
+            layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
         # 每一层 rebuild 后迭代一次
         if "graph" in layers[i]:
@@ -1133,11 +1186,11 @@ def vloop(layers):
     for i in range(len(layers) - 1, 0, -1):
         name = layers[i]["name"]
         if name.startswith("super"):
-            # 把 super 的 mu 拆回 base
+            # 把 super 的 mu 拆回 base/abs
             top_down_modify_base_and_abs_graph(layers[:i+1])
         elif name.startswith("abs"):
-            # TODO: abs -> super 的传递函数还没写，这里先跳过
-            continue
+            # 把 abs 的 mu 投影回 super
+            top_down_modify_super_graph(layers[:i+1])
 
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
@@ -1153,7 +1206,7 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Span("N:", style={"marginRight":"6px"}),
-            dcc.Input(id="param-N", type="number", value=256, min=2, step=1,
+            dcc.Input(id="param-N", type="number", value=512, min=2, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("step:", style={"marginRight":"6px"}),
@@ -1209,7 +1262,7 @@ app.layout = html.Div([
             dcc.Input(id="kmeans-k", type="number", value=128, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("seed:", style={"marginRight":"6px"}),
-            dcc.Input(id="rand-seed", type="number", value=0, step=1,
+            dcc.Input(id="rand-seed", type="number", value=2001, step=1,
                   style={"width":"100px"})
         ], style={"flex":"1"}),
 
@@ -1350,7 +1403,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             layers[-1]["graph"].synchronous_iteration() 
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
-            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"] = build_abs_graph(layers, r_reduced=2)
+            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=2)
         else:
             k_next = pair_idx + 1
             super_layer_idx = k_next*2 - 1
