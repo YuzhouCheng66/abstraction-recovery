@@ -1190,7 +1190,8 @@ def vloop(layers):
             top_down_modify_base_and_abs_graph(layers[:i+1])
         elif name.startswith("abs"):
             # 把 abs 的 mu 投影回 super
-            top_down_modify_super_graph(layers[:i+1])
+            #top_down_modify_super_graph(layers[:i+1])
+            pass
 
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
