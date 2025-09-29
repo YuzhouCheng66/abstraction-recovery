@@ -1197,7 +1197,6 @@ def vloop(layers):
     refresh_gbp_results(layers)
 
 
-
 # -----------------------
 # Layout
 # -----------------------
