@@ -993,12 +993,14 @@ def top_down_modify_super_graph(layers):
 
     假设 layers[-1] 是 abs, layers[-2] 是 super。
     """
+
     abs_graph = layers[-1]["graph"]
     super_graph = layers[-2]["graph"]
     Bs = layers[-1]["Bs"]      # { super_id(int) -> B (2 x dofs) }
     ks = layers[-1]["ks"]      # { super_id(int) -> k }
     k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance }
 
+    
     for sn in super_graph.var_nodes:
         sid = sn.variableID
         if sid not in Bs or sid not in ks:
@@ -1010,17 +1012,19 @@ def top_down_modify_super_graph(layers):
         # 1. update mu
         mu_abs = abs_graph.var_nodes[sid].mu
         mu_super = B @ mu_abs + k
-        #Sigma_abs = abs_graph.var_nodes[sid].Sigma
-        #Sigma_super = B @ Sigma_abs @ B.T + k2
+        Sigma_abs = abs_graph.var_nodes[sid].Sigma
+        Sigma_super = B @ Sigma_abs @ B.T + k2
         sn.mu = mu_super
         #sn.Sigma = Sigma_super
 
+        
         # 2. new belief (keep Σ unchanged, use new mu)
         lam = np.linalg.inv(sn.Sigma)
         eta = lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, lam)
         old_belief = sn.belief
         sn.belief = new_belief
+
 
         # 3. update adj_beliefs and messages
         if sn.adj_factors:
@@ -1031,13 +1035,12 @@ def top_down_modify_super_graph(layers):
                 if sn in f.adj_var_nodes:
                     idx_in_factor = f.adj_var_nodes.index(sn)
                     # update factor's adj_belief
-                    f.adj_beliefs[idx_in_factor] = new_belief
+                    #f.adj_beliefs[idx_in_factor] = new_belief
                     # update corresponding messages
-                    msg = f.messages[idx_in_factor]
+                    #msg = f.messages[idx_in_factor]
                     #msg.eta += d_eta / n_adj
-                    #msg.lam += d_lam / n_adj
-                    f.messages[idx_in_factor] = NdimGaussian(msg.dim)
-    super_graph.compute_all_messages()
+                    #msg.lam = sid
+                    #f.messages[idx_in_factor] = NdimGaussian(msg.dim)
 
 
     return
@@ -1190,8 +1193,7 @@ def vloop(layers):
             top_down_modify_base_and_abs_graph(layers[:i+1])
         elif name.startswith("abs"):
             # 把 abs 的 mu 投影回 super
-            #top_down_modify_super_graph(layers[:i+1])
-            pass
+            top_down_modify_super_graph(layers[:i+1])
 
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
