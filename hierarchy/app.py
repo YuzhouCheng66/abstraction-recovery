@@ -255,6 +255,88 @@ def copy_to_abs(super_nodes, super_edges, layer_idx):
     return abs_nodes, abs_edges
 
 # -----------------------
+# 顺序合并（尾组吞余数）
+# -----------------------
+def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
+    """
+    顺序把 prev_nodes 按当前顺序切成 k 组，最后一组吞余数（tail_heavy=True）。
+    复用现有的维度/num_base 聚合与边去重、prior 传递规则。
+    """
+    n = len(prev_nodes)
+    if k <= 0: k = 1
+    k = min(k, n)
+
+    # 组尺寸
+    base = n // k
+    rem  = n %  k
+    if tail_heavy:
+        sizes = [base]*(k-1) + [base+rem]     # 尾部吞余数：..., last += rem
+    else:
+        sizes = [base+1]*rem + [base]*(k-rem) # 平均摊余数（可选）
+
+    # 构组：记录每组索引
+    groups = []
+    start = 0
+    for s in sizes:
+        groups.append(list(range(start, start+s)))
+        start += s
+
+    # ---- 构造 super_nodes & node_map ----
+    positions = np.array([[n["position"]["x"], n["position"]["y"]] for n in prev_nodes], dtype=float)
+
+    super_nodes, node_map = [], {}
+    for gi, idxs in enumerate(groups):
+        pts = positions[idxs]
+        mean_x, mean_y = pts.mean(axis=0)
+
+        child_dims = [prev_nodes[i]["data"]["dim"] for i in idxs]
+        child_nums = [prev_nodes[i]["data"].get("num_base", 1) for i in idxs]
+        dim_val = int(max(1, sum(child_dims)))
+        num_val = int(sum(child_nums))
+
+        nid = f"{gi}"  # 与 kmeans 一致：用组号作 id（字符串）
+        super_nodes.append({
+            "data": {
+                "id": nid,
+                "layer": layer_idx,
+                "dim": dim_val,
+                "num_base": num_val
+            },
+            "position": {"x": float(mean_x), "y": float(mean_y)}
+        })
+        # 建立 base-id -> super-id 映射（注意你全程用字符串 id）
+        for i in idxs:
+            node_map[prev_nodes[i]["data"]["id"]] = nid
+
+    # ---- 超边：跨组边保留且去重，组内边折成 prior；prior 边上卷到所属 super ----
+    super_edges, seen = [], set()
+    for e in prev_edges:
+        u, v = e["data"]["source"], e["data"]["target"]
+
+        if v != "prior":
+            su, sv = node_map[u], node_map[v]
+            if su != sv:
+                eid = tuple(sorted((su, sv)))
+                if eid not in seen:
+                    super_edges.append({"data": {"source": su, "target": sv}})
+                    seen.add(eid)
+            else:
+                # 组内二元边 → 组先验（与 grid/kmeans 的处理保持一致）
+                eid = tuple(sorted((su, "prior")))
+                if eid not in seen:
+                    super_edges.append({"data": {"source": su, "target": "prior"}})
+                    seen.add(eid)
+        else:
+            su = node_map[u]
+            eid = tuple(sorted((su, "prior")))
+            if eid not in seen:
+                super_edges.append({"data": {"source": su, "target": "prior"}})
+                seen.add(eid)
+
+    return super_nodes, super_edges, node_map
+
+
+# -----------------------
 # 工具
 # -----------------------
 def parse_layer_name(name):
@@ -756,7 +838,6 @@ def build_abs_graph(
         def jac_fn_abs_prior(x_abs, *args):
             return sup_factor.jac_fn(B @ x_abs + k) @ B
 
-
         return meas_fn_abs_prior, jac_fn_abs_prior, sup_factor.measurement, sup_factor.measurement_lambda
     
 
@@ -810,8 +891,8 @@ def build_abs_graph(
                 B = Bs[sid]
                 eta_a, lam_a = project_msg(s_msg, B)
                 # 直接写到 abs_f.messages[0]
-                #abs_f.messages[0].eta = eta_a.copy()
-                #abs_f.messages[0].lam = lam_a.copy()
+                abs_f.messages[0].eta = eta_a.copy()
+                abs_f.messages[0].lam = lam_a.copy()
 
 
             abs_fg.factors.append(abs_f)
@@ -837,15 +918,15 @@ def build_abs_graph(
                 si = sv_i.variableID
                 Bi = Bs[si]
                 eta_ai, lam_ai = project_msg(s_msg_i, Bi)
-                #abs_f.messages[0].eta = eta_ai.copy()
-                #abs_f.messages[0].lam = lam_ai.copy()
+                abs_f.messages[0].eta = eta_ai.copy()
+                abs_f.messages[0].lam = lam_ai.copy()
             # j 端
             if s_msg_j is not None:
                 sj = sv_j.variableID
                 Bj = Bs[sj]
                 eta_aj, lam_aj = project_msg(s_msg_j, Bj)
-                #abs_f.messages[1].eta = eta_aj.copy()
-                #abs_f.messages[1].lam = lam_aj.copy()
+                abs_f.messages[1].eta = eta_aj.copy()
+                abs_f.messages[1].lam = lam_aj.copy()
 
             abs_fg.factors.append(abs_f)
             vi.adj_factors.append(abs_f)
@@ -988,62 +1069,110 @@ def top_down_modify_base_and_abs_graph(layers):
 
 def top_down_modify_super_graph(layers):
     """
-    从 abs graph 往下，把 mu 投影回 super graph，
+    从 abs graph 往下，把 mu / Sigma 投影回 super graph，
     并同步修正 super variable 的 belief 与相邻 factor 的 adj_beliefs / messages。
 
-    假设 layers[-1] 是 abs, layers[-2] 是 super。
+    要求：
+      - layers[-1] 是 abs, layers[-2] 是 super
+      - abs 层的因子与 super 层的因子使用相同的 factorID（一一对应）
+      - Bs 的列是正交归一的（来自协方差特征向量；np.linalg.eigh 的特征向量正交）
     """
+    import numpy as np
 
-    abs_graph = layers[-1]["graph"]
+    abs_graph   = layers[-1]["graph"]
     super_graph = layers[-2]["graph"]
-    Bs = layers[-1]["Bs"]      # { super_id(int) -> B (2 x dofs) }
-    ks = layers[-1]["ks"]      # { super_id(int) -> k }
-    k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance }
+    Bs  = layers[-1]["Bs"]   # { super_id(int) -> B (d_super × r) }
+    ks  = layers[-1]["ks"]   # { super_id(int) -> k (d_super,) }
+    k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance (d_super × d_super) }
 
-    
+    # 预建 abs 因子查找：factorID -> Factor
+    abs_f_by_id = {f.factorID: f for f in getattr(abs_graph, "factors", [])}
+
+    # ---- 先投影变量的 mu / Sigma 并更新 belief ----
     for sn in super_graph.var_nodes:
         sid = sn.variableID
         if sid not in Bs or sid not in ks:
             continue
-        B = Bs[sid]
-        k = ks[sid]
-        k2 = k2s[sid]
+        B  = Bs[sid]    # (d_s × r)
+        k  = ks[sid]    # (d_s,)
+        k2 = k2s[sid]   # (d_s × d_s)
 
-        # 1. update mu
-        mu_abs = abs_graph.var_nodes[sid].mu
-        mu_super = B @ mu_abs + k
-        Sigma_abs = abs_graph.var_nodes[sid].Sigma
-        Sigma_super = B @ Sigma_abs @ B.T + k2
-        sn.mu = mu_super
-        #sn.Sigma = Sigma_super
+        # x_s = B x_a + k；Σ_s = B Σ_a Bᵀ + k2
+        mu_a    = abs_graph.var_nodes[sid].mu
+        Sigma_a = abs_graph.var_nodes[sid].Sigma
+        mu_s    = B @ mu_a + k
+        Sigma_s = B @ Sigma_a @ B.T + k2
 
-        
-        # 2. new belief (keep Σ unchanged, use new mu)
+        sn.mu     = mu_s
+        sn.Sigma  = Sigma_s
+
+        # 用新 μ + Σ 刷新 super belief（自然参数）
         lam = np.linalg.inv(sn.Sigma)
         eta = lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, lam)
-        old_belief = sn.belief
-        sn.belief = new_belief
+        sn.belief  = new_belief
 
+    # ---- 再把 abs 的消息投回 super，并在正交补上保留 super 原消息 ----
+    # 思路：对 super 因子 f_sup 上与变量 sid 相连的一侧：
+    #   η_s_new = B η_a + (I - B Bᵀ) η_s_old
+    #   Λ_s_new = B Λ_a Bᵀ + (I - B Bᵀ) Λ_s_old (I - B Bᵀ)
+    # 这样保证子空间由 abs 消息支配，正交补仍由 super 旧消息维持。
+    for sn in super_graph.var_nodes:
+        sid = sn.variableID
+        if sid not in Bs:
+            continue
+        B  = Bs[sid]                         # (d_s × r)
+        dS = sn.dofs
+        I  = np.eye(dS)
+        # BBᵀ 是到部分子空间的正交投影（B 列向量来自特征向量，正交）
+        P_sub = B @ B.T
+        P_ort = I - P_sub                    # 正交补投影
 
-        # 3. update adj_beliefs and messages
-        if sn.adj_factors:
-            n_adj = len(sn.adj_factors)
-            d_eta = new_belief.eta - old_belief.eta
-            d_lam = new_belief.lam - old_belief.lam
-            for f in sn.adj_factors:
-                if sn in f.adj_var_nodes:
-                    idx_in_factor = f.adj_var_nodes.index(sn)
-                    # update factor's adj_belief
-                    #f.adj_beliefs[idx_in_factor] = new_belief
-                    # update corresponding messages
-                    #msg = f.messages[idx_in_factor]
-                    #msg.eta += d_eta / n_adj
-                    #msg.lam = sid
-                    #f.messages[idx_in_factor] = NdimGaussian(msg.dim)
+        # 遍历与该 super 变量相邻的 super 因子
+        for f_sup in sn.adj_factors:
+            # 找 super 因子里该变量的位置索引
+            try:
+                idx_side = f_sup.adj_var_nodes.index(sn)
+            except ValueError:
+                continue
 
+            # 找到对应的 abs 因子（factorID 一致）
+            f_abs = abs_f_by_id.get(f_sup.factorID, None)
+            if f_abs is None:
+                # 没有对应 abs 因子就跳过
+                continue
+
+            # abs 因子中，同一侧索引和 super 一致（你在 build_abs_graph 中保持顺序一致）
+            msg_a = f_abs.messages[idx_side]
+            msg_s = f_sup.messages[idx_side]
+            if msg_a is None or msg_s is None:
+                # 有些 message 可能尚未初始化
+                continue
+
+            # —— 投影消息自然参数 —— #
+            # abs → super 子空间
+            eta_s_sub = B @ msg_a.eta               # (d_s,)
+            lam_s_sub = B @ msg_a.lam @ B.T         # (d_s × d_s)
+
+            # super 的旧消息在正交补保留
+            eta_s_ort = P_ort @ msg_s.eta
+            lam_s_ort = P_ort @ msg_s.lam @ P_ort
+
+            eta_s_new = eta_s_sub + eta_s_ort
+            lam_s_new = lam_s_sub + lam_s_ort
+            # 数值对称化，避免累计误差
+            lam_s_new = 0.5 * (lam_s_new + lam_s_new.T)
+
+            # 回写到 super 因子对应侧的消息
+            msg_s.eta = eta_s_new
+            msg_s.lam = lam_s_new
+            f_sup.messages[idx_side] = msg_s
+
+            # 同步更新该侧在因子内部记录的相邻 belief（可选，通常下次迭代会刷新）
+            f_sup.adj_beliefs[idx_side] = sn.belief
 
     return
+
 
 
 def refresh_gbp_results(layers):
@@ -1169,6 +1298,10 @@ def vloop(layers):
         layers[0]["graph"].synchronous_iteration()
 
     for i in range(1, len(layers)):
+        # 每一层迭代一次后rebuild
+        if "graph" in layers[i]:
+            layers[i]["graph"].synchronous_iteration()
+
         name = layers[i]["name"]
         if name.startswith("super"):
             # 用前一层的 graph 更新 super
@@ -1181,12 +1314,11 @@ def vloop(layers):
             layers[i]["graph"] = abs_graph
             layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
-        # 每一层 rebuild 后迭代一次
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
-
     # ---- top-down (传 mu) ----
     for i in range(len(layers) - 1, 0, -1):
+        # 每一层迭代一次后reproject
+        if "graph" in layers[i]:
+            layers[i]["graph"].synchronous_iteration()
         name = layers[i]["name"]
         if name.startswith("super"):
             # 把 super 的 mu 拆回 base/abs
@@ -1231,18 +1363,16 @@ app.layout = html.Div([
             dcc.Checklist(
                 id="show-number",
                 options=[{"label": "", "value": "on"}],
-                value=["on"],   # ✅ 默认勾选
+                value=["on"],
                 style={"display": "inline-block", "marginRight":"12px"}
             ),
-
-
         ], style={"flex":"1"}),
 
         html.Div([
             html.Button("New Graph", id="new-graph", n_clicks=0,
                         style={"display":"block", "width":"120px"})
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
-    ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"10px 10px 6px"}),
+    ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
     # 行2：聚合参数 + Add Layer
     html.Div([
@@ -1250,7 +1380,11 @@ app.layout = html.Div([
             html.Span("Mode:", style={"marginRight":"6px"}),
             dcc.Dropdown(
                 id="agg-mode",
-                options=[{"label":"Grid","value":"grid"},{"label":"K-Means","value":"kmeans"}],
+                options=[
+                    {"label":"Grid","value":"grid"},
+                    {"label":"K-Means","value":"kmeans"},
+                    {"label":"Order","value":"order"}
+                ],
                 value="kmeans", clearable=False, className="mode-dd",
                 style={"width":"120px","height":"26px","display":"inline-block","marginRight":"12px"}
             ),
@@ -1265,7 +1399,7 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("seed:", style={"marginRight":"6px"}),
             dcc.Input(id="rand-seed", type="number", value=2001, step=1,
-                  style={"width":"100px"})
+                      style={"width":"100px"})
         ], style={"flex":"1"}),
 
         html.Div([
@@ -1274,33 +1408,67 @@ app.layout = html.Div([
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
-    # 行3：GBP 参数 + GBP Solver
+    # 行3：GBP 参数 + Project Layer
     html.Div([
         html.Div([
             html.Span("prior σ:", style={"marginRight":"6px"}),
             dcc.Input(id="prior-noise", type="number", value=1.0, step=0.01,
-                      style={"width":"100px", "marginRight":"12px"}),
+                    style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("odom σ:", style={"marginRight":"6px"}),
             dcc.Input(id="odom-noise", type="number", value=1.0, step=0.01,
-                      style={"width":"100px", "marginRight":"12px"}),
+                    style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("iters:", style={"marginRight":"6px"}),
             dcc.Input(id="param-iters", type="number", value=5, step=1,
-                      style={"width":"100px", "marginRight":"12px"}),
+                    style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("snap:", style={"marginRight":"6px"}),
             dcc.Input(id="param-snap", type="number", value=0.1, step=0.1,
-                      style={"width":"100px"})
+                    style={"width":"100px"})
         ], style={"flex":"1"}),
 
         html.Div([
+            # ✅ 正确的按钮 id
+            html.Button("Project Layer", id="project-layer", n_clicks=0,
+                        style={"display":"block", "width":"120px"})
+        ], style={"marginLeft":"20px", "flex":"0 0 auto"})
+    ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
+
+
+    # 行4：Layer 工具条 + V Cycle（合并在一行）
+    html.Div([
+        # 左侧：Layer 选择 + 状态
+        html.Div([
+            html.Span("Layer:", style={"marginRight":"6px"}),
+            dcc.Dropdown(
+                id="layer-select",
+                options=[{"label": "base", "value": "base"}],
+                value="base",
+                clearable=False,
+                style={"width": "240px", "margin": "0"}
+            ),
+            html.Div(id="gbp-status",
+                    style={"margin":"0 0 0 16px", "fontStyle":"italic", "color":"#444", "whiteSpace":"nowrap"}),
+            html.Div(id="vcycle-status",
+                    style={"margin":"0 0 0 12px", "fontStyle":"italic", "color":"#444", "whiteSpace":"nowrap"}),
+        ], style={
+            "display":"flex",
+            "alignItems":"center",
+            "gap":"8px",
+            "flex":"1"
+        }),
+
+        # 右侧：V Cycle 按钮
+        html.Div([
             html.Button("GBP Solver", id="gbp-run", n_clicks=0,
+            
                         style={"display":"block", "background":"#111","color":"#fff","width":"120px"})
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
-    ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px 10px"}),
+    ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
-    # 行4：V Cycle 控制
+
+    # 行5：V Cycle 控制
     html.Div([
         html.Div([
             html.Button("V Cycle", id="vcycle-run", n_clicks=0,
@@ -1308,23 +1476,12 @@ app.layout = html.Div([
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"flex-end", "alignItems":"center", "margin":"6px 10px"}),
 
-
-    # 下面保持不变
-    dcc.Dropdown(
-        id="layer-select",
-        options=[{"label": "base", "value": "base"}],
-        value="base", clearable=False, style={"width": "300px", "margin":"6px 10px"}
-    ),
-
-    html.Div(id="gbp-status", style={"margin":"6px 10px", "fontStyle":"italic", "color":"#444"}),
-    html.Div(id="vcycle-status", style={"margin":"6px 10px", "fontStyle":"italic", "color":"#444"}),
-
-
+    # 行6：层选择 + 状态（紧凑工具条）
+    # Stores / Intervals / Cytoscape
     dcc.Store(id="gbp-state", data={"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}),
     dcc.Store(id="gbp-poses", data=None),
     dcc.Interval(id="gbp-interval", interval=200, n_intervals=0, disabled=True),
 
-    # ✅ 新增的 V Cycle 控制
     dcc.Store(id="vcycle-state", data={"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}),
     dcc.Interval(id="vcycle-interval", interval=500, n_intervals=0, disabled=True),
 
@@ -1334,7 +1491,8 @@ app.layout = html.Div([
         layout={"name": "preset"},
         elements=[]
     )
-])
+    ])
+
 
 
 # -----------------------
@@ -1411,8 +1569,10 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             super_layer_idx = k_next*2 - 1
             if mode == "grid":
                 super_nodes, super_edges, node_map = fuse_to_super_grid(last["nodes"], last["edges"], int(gx or 2), int(gy or 2), super_layer_idx)
-            else:
+            elif mode == "kmeans":
                 super_nodes, super_edges, node_map = fuse_to_super_kmeans(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
+            else:
+                super_nodes, super_edges, node_map = fuse_to_super_order(last["nodes"], last["edges"], int(kk or 8), super_layer_idx, tail_heavy=True)
             # Ensure super graph has run at least once
             layers[-1]["graph"].synchronous_iteration() 
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
@@ -1529,9 +1689,6 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
 
 
 # -----------------------
-# 合并的 GBP 回调（按钮 + interval）
-# -----------------------
-# -----------------------
 # 合并的 GBP 回调（按钮 + interval + new-graph 急停）
 # -----------------------
 from dash import no_update
@@ -1551,7 +1708,8 @@ from dash import no_update
     Input("gbp-interval", "n_intervals"),
     Input("vcycle-run", "n_clicks"),
     Input("vcycle-interval", "n_intervals"),
-    Input("new-graph", "n_clicks"),   # ✅ 统一急停
+    Input("project-layer", "n_clicks"),       # ✅ 新增：Project Layer
+    Input("new-graph", "n_clicks"),           # ✅ 统一急停仍保留
     State("gbp-state", "data"),
     State("vcycle-state", "data"),
     State("param-iters","value"),
@@ -1559,10 +1717,9 @@ from dash import no_update
     State("layer-select","value"),
     prevent_initial_call=True
 )
-
-
 def unified_solver(gbp_click, gbp_ticks,
                    vcycle_click, vcycle_ticks,
+                   project_click,                    # ✅ 新增入参
                    new_graph_click,
                    gbp_state, vcycle_state,
                    iters, snap_int, current_layer):
@@ -1579,6 +1736,41 @@ def unified_solver(gbp_click, gbp_ticks,
         reset_state = {"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}
         return None, "Ready. New graph created.", reset_state, True, 0, \
                "", reset_state, True, 0
+
+    # ==== Project Layer ====
+    if trig.startswith("project-layer"):
+        # 定位当前层
+        try:
+            idx = next(i for i, L in enumerate(layers) if L["name"] == current_layer)
+        except StopIteration:
+            return no_update, f"Layer '{current_layer}' not found.", gbp_state, True, no_update, \
+                   no_update, vcycle_state, True, no_update
+
+        kind, k = parse_layer_name(current_layer)
+
+        if kind == "super":
+            # super -> base
+            if idx - 1 < 0 or "graph" not in layers[idx] or "graph" not in layers[idx-1]:
+                return no_update, f"Cannot project: graphs not ready for {current_layer}.", gbp_state, True, no_update, \
+                       no_update, vcycle_state, True, no_update
+            top_down_modify_base_and_abs_graph(layers[:idx+1])
+            msg = f"Projected {current_layer} → base."
+        elif kind == "abs":
+            # abs -> super
+            if "graph" not in layers[idx] or "graph" not in layers[idx-1]:
+                return no_update, f"Cannot project: graphs not ready for {current_layer}.", gbp_state, True, no_update, \
+                       no_update, vcycle_state, True, no_update
+            top_down_modify_super_graph(layers[:idx+1])
+            msg = f"Projected {current_layer} → super."
+        else:
+            # base 无下层
+            msg = "Base layer has no lower layer to project to."
+
+        # 刷新并返回当前层位姿（触发 Cytoscape 重绘）
+        refresh_gbp_results(layers)
+        latest_positions = layers[idx].get("gbp_result", None)
+        return latest_positions, msg, gbp_state, True, no_update, \
+               no_update, vcycle_state, True, no_update
 
     # ==== GBP Solver ====
     if trig.startswith("gbp-run"):
@@ -1642,11 +1834,10 @@ def unified_solver(gbp_click, gbp_ticks,
         batch = max(1, min(snap_int, iters_total - iters_done))
 
         for _ in range(batch):
-            vloop(layers)   # ✅ 调用你定义的 vloop()
+            vloop(layers)
 
         refresh_gbp_results(layers)
         latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]
-
 
         iters_done += batch
         vcycle_state["iters_done"] = iters_done
@@ -1660,8 +1851,6 @@ def unified_solver(gbp_click, gbp_ticks,
 
     return no_update, no_update, gbp_state, True, no_update, \
            no_update, vcycle_state, True, no_update
-
-
 
 
 # -----------------------
