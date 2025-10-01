@@ -15,22 +15,22 @@ app.title = "Factor Graph SVD Abs&Recovery"
 # -----------------------
 def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
     if rng is None :
-        rng = np.random.default_rng()  # ✅ 确保有 RNG
+        rng = np.random.default_rng()  # ✅ Ensure we have an RNG
 
     nodes, edges = [], []
     positions = []
     x, y = 0.0, 0.0
     positions.append((x, y))
 
-    # ✅ 固定随机：轨迹生成
+    # ✅ Deterministic-by-RNG: trajectory generation
     for _ in range(1, int(N)):
-        dx, dy = rng.standard_normal(2)  # 替换 np.random.randn
+        dx, dy = rng.standard_normal(2)  # replace np.random.randn
         norm = np.sqrt(dx**2 + dy**2) + 1e-6
         dx, dy = dx / norm * float(step_size), dy / norm * float(step_size)
         x, y = x + dx, y + dy
         positions.append((x, y))
 
-    # 基本顺序边
+    # Sequential edges along the path
     for i, (px, py) in enumerate(positions):
         nodes.append({
             "data": {"id": f"{i}", "layer": 0, "dim": 2, "num_base": 1},
@@ -40,16 +40,16 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
     for i in range(int(N) - 1):
         edges.append({"data": {"source": f"{i}", "target": f"{i+1}"}})
 
-    # ✅ 固定随机：回环边
+    # ✅ Deterministic-by-RNG: loop-closure edges
     for i in range(int(N)):
         for j in range(i + 5, int(N)):
-            if rng.random() < float(loop_prob):  # 替换 np.random.rand
+            if rng.random() < float(loop_prob):  # replace np.random.rand
                 xi, yi = positions[i]
                 xj, yj = positions[j]
                 if np.hypot(xi - xj, yi - yj) < float(loop_radius):
                     edges.append({"data": {"source": f"{i}", "target": f"{j}"}})
 
-    # ✅ prior 抽样也用同一个 rng
+    # ✅ Sample priors using the same RNG
     if prior_prop <= 0.0:
         strong_ids = {0}
     elif prior_prop >= 1.0:
@@ -58,11 +58,12 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
         k = max(1, int(np.floor(prior_prop * N)))
         strong_ids = set(rng.choice(N, size=k, replace=False).tolist())
 
-    # 给 strong prior 节点加 edge
+    # Add edges for nodes with strong priors
     for i in strong_ids:
         edges.append({"data": {"source": f"{i}", "target": "prior"}})
 
     return nodes, edges
+
 
 
 # -----------------------
@@ -1069,13 +1070,14 @@ def top_down_modify_base_and_abs_graph(layers):
 
 def top_down_modify_super_graph(layers):
     """
-    从 abs graph 往下，把 mu / Sigma 投影回 super graph，
-    并同步修正 super variable 的 belief 与相邻 factor 的 adj_beliefs / messages。
+    From the abs graph downward, project mu / Sigma back to the super graph,
+    and simultaneously update the super variables' beliefs and the adjacent
+    factors' adj_beliefs / messages.
 
-    要求：
-      - layers[-1] 是 abs, layers[-2] 是 super
-      - abs 层的因子与 super 层的因子使用相同的 factorID（一一对应）
-      - Bs 的列是正交归一的（来自协方差特征向量；np.linalg.eigh 的特征向量正交）
+    Requirements:
+      - layers[-1] is abs, layers[-2] is super
+      - Factors at the abs level and the super level share the same factorID (one-to-one)
+      - The columns of B are orthonormal (from covariance eigenvectors; eigenvectors from np.linalg.eigh are orthogonal)
     """
     import numpy as np
 
@@ -1085,10 +1087,10 @@ def top_down_modify_super_graph(layers):
     ks  = layers[-1]["ks"]   # { super_id(int) -> k (d_super,) }
     k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance (d_super × d_super) }
 
-    # 预建 abs 因子查找：factorID -> Factor
+    # Prebuild abs factor index: factorID -> Factor
     abs_f_by_id = {f.factorID: f for f in getattr(abs_graph, "factors", [])}
 
-    # ---- 先投影变量的 mu / Sigma 并更新 belief ----
+    # ---- First project variables' mu / Sigma and update beliefs ----
     for sn in super_graph.var_nodes:
         sid = sn.variableID
         if sid not in Bs or sid not in ks:
@@ -1097,7 +1099,7 @@ def top_down_modify_super_graph(layers):
         k  = ks[sid]    # (d_s,)
         k2 = k2s[sid]   # (d_s × d_s)
 
-        # x_s = B x_a + k；Σ_s = B Σ_a Bᵀ + k2
+        # x_s = B x_a + k; Σ_s = B Σ_a Bᵀ + k2
         mu_a    = abs_graph.var_nodes[sid].mu
         Sigma_a = abs_graph.var_nodes[sid].Sigma
         mu_s    = B @ mu_a + k
@@ -1106,17 +1108,17 @@ def top_down_modify_super_graph(layers):
         sn.mu     = mu_s
         sn.Sigma  = Sigma_s
 
-        # 用新 μ + Σ 刷新 super belief（自然参数）
+        # Refresh super belief (natural parameters) with the new μ and Σ
         lam = np.linalg.inv(sn.Sigma)
         eta = lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, lam)
         sn.belief  = new_belief
 
-    # ---- 再把 abs 的消息投回 super，并在正交补上保留 super 原消息 ----
-    # 思路：对 super 因子 f_sup 上与变量 sid 相连的一侧：
+    # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
+    # Idea: for the side of the super factor f_sup connected to variable sid:
     #   η_s_new = B η_a + (I - B Bᵀ) η_s_old
     #   Λ_s_new = B Λ_a Bᵀ + (I - B Bᵀ) Λ_s_old (I - B Bᵀ)
-    # 这样保证子空间由 abs 消息支配，正交补仍由 super 旧消息维持。
+    # This ensures the subspace is governed by the abs message, while the orthogonal complement keeps the old super message.
     for sn in super_graph.var_nodes:
         sid = sn.variableID
         if sid not in Bs:
@@ -1124,51 +1126,51 @@ def top_down_modify_super_graph(layers):
         B  = Bs[sid]                         # (d_s × r)
         dS = sn.dofs
         I  = np.eye(dS)
-        # BBᵀ 是到部分子空间的正交投影（B 列向量来自特征向量，正交）
+        # BBᵀ is the orthogonal projector to the subspace (columns of B come from eigenvectors and are orthogonal)
         P_sub = B @ B.T
-        P_ort = I - P_sub                    # 正交补投影
+        P_ort = I - P_sub                    # Orthogonal-complement projector
 
-        # 遍历与该 super 变量相邻的 super 因子
+        # Iterate over super factors adjacent to this super variable
         for f_sup in sn.adj_factors:
-            # 找 super 因子里该变量的位置索引
+            # Locate the index of this variable on the super factor
             try:
                 idx_side = f_sup.adj_var_nodes.index(sn)
             except ValueError:
                 continue
 
-            # 找到对应的 abs 因子（factorID 一致）
+            # Find the corresponding abs factor (same factorID)
             f_abs = abs_f_by_id.get(f_sup.factorID, None)
             if f_abs is None:
-                # 没有对应 abs 因子就跳过
+                # Skip if there is no corresponding abs factor
                 continue
 
-            # abs 因子中，同一侧索引和 super 一致（你在 build_abs_graph 中保持顺序一致）
+            # In the abs factor, the side index matches the super one (you keep the order consistent in build_abs_graph)
             msg_a = f_abs.messages[idx_side]
             msg_s = f_sup.messages[idx_side]
             if msg_a is None or msg_s is None:
-                # 有些 message 可能尚未初始化
+                # Some messages may not have been initialized yet
                 continue
 
-            # —— 投影消息自然参数 —— #
-            # abs → super 子空间
+            # —— Project message natural parameters —— #
+            # abs → super subspace
             eta_s_sub = B @ msg_a.eta               # (d_s,)
             lam_s_sub = B @ msg_a.lam @ B.T         # (d_s × d_s)
 
-            # super 的旧消息在正交补保留
+            # Keep the old super message on the orthogonal complement
             eta_s_ort = P_ort @ msg_s.eta
             lam_s_ort = P_ort @ msg_s.lam @ P_ort
 
             eta_s_new = eta_s_sub + eta_s_ort
             lam_s_new = lam_s_sub + lam_s_ort
-            # 数值对称化，避免累计误差
+            # Symmetrize numerically to avoid accumulated error
             lam_s_new = 0.5 * (lam_s_new + lam_s_new.T)
 
-            # 回写到 super 因子对应侧的消息
+            # Write back to the message at the corresponding side of the super factor
             msg_s.eta = eta_s_new
             msg_s.lam = lam_s_new
             f_sup.messages[idx_side] = msg_s
 
-            # 同步更新该侧在因子内部记录的相邻 belief（可选，通常下次迭代会刷新）
+            # Also update the factor's recorded adjacent belief on that side (optional; usually refreshed in the next iteration)
             f_sup.adj_beliefs[idx_side] = sn.belief
 
     return
@@ -1177,17 +1179,17 @@ def top_down_modify_super_graph(layers):
 
 def refresh_gbp_results(layers):
     """
-    为每层预计算到 base 平面的仿射映射:
+    Precompute an affine map to the base plane for each layer:
       base:   A_i = I2, b_i = 0
       super:  A_s = (1/m) [A_c1, A_c2, ..., A_cm], b_s = (1/m) Σ b_cj
       abs:    A_a = A_super(s) @ B_s,             b_a = A_super(s) @ k_s + b_super(s)
-    然后用 pos = A @ mu + b 刷新 gbp_result。
-    约定：所有键一律用字符串（与 Cytoscape id 对齐）。
+    Then refresh gbp_result via pos = A @ mu + b.
+    Convention: use string keys everywhere (aligned with Cytoscape ids).
     """
     if not layers:
         return
 
-    # ---------- 1) 自底向上，计算每层 A,b ----------
+    # ---------- 1) Bottom-up: compute A, b for each layer ----------
     for li, L in enumerate(layers):
         g = L.get("graph")
         if g is None:
@@ -1208,7 +1210,7 @@ def refresh_gbp_results(layers):
             parent = layers[li - 1]
             node_map = L["node_map"]  # { prev_id(str) -> super_id(str) }
 
-            # 分组（保持插入顺序，确保和 build_super_graph 拼接顺序一致）
+            # Grouping (preserve insertion order to match the concatenation order in build_super_graph)
             groups = {}
             for prev_id, s_id in node_map.items():
                 prev_id = str(prev_id); s_id = str(s_id)
@@ -1217,8 +1219,8 @@ def refresh_gbp_results(layers):
             L["A"], L["b"] = {}, {}
             for s_id, children in groups.items():
                 m = len(children)
-                # 横向拼接 [A_c1, A_c2, ...]
-                A_blocks = [parent["A"][cid] for cid in children]  # 每块形状 2×d_c
+                # Horizontal concatenation [A_c1, A_c2, ...]
+                A_blocks = [parent["A"][cid] for cid in children]  # each block has shape 2×d_c
                 A_concat = np.hstack(A_blocks) if A_blocks else np.zeros((2, 0))
                 b_sum = sum((parent["b"][cid] for cid in children), start=np.zeros(2, dtype=float))
                 L["A"][s_id] = (1.0 / m) * A_concat
@@ -1226,31 +1228,31 @@ def refresh_gbp_results(layers):
 
         # ---- abs ----
         elif name.startswith("abs"):
-            parent = layers[li - 1]  # 对应的 super 层
-            Bs, ks = L["Bs"], L["ks"]  # 注意：键是 super 的 variableID (int)
+            parent = layers[li - 1]  # the corresponding super layer
+            Bs, ks = L["Bs"], L["ks"]  # Note: keys are the super variableIDs (int)
 
-            # 建一个 super 变量ID(int) <-> super 字符串 id 的映射（按节点列表顺序）
-            # 父层(super)与本层(abs)的 nodes 顺序是一致的（copy_to_abs 保持顺序）
+            # Build a mapping between super variableID (int) and the super string id (follow node list order)
+            # The order of nodes in the parent (super) and this (abs) layer is consistent (copy_to_abs preserves order)
             int2sid = {i: str(parent["nodes"][i]["data"]["id"]) for i in range(len(parent["nodes"]))}
 
             L["A"], L["b"] = {}, {}
             for av in g.var_nodes:
-                sid_int = av.variableID          # super 的 variableID (int)
-                s_id = int2sid.get(sid_int, str(sid_int))  # super 的字符串 id（同时也是 abs 节点 id）
-                B = Bs[sid_int]                   # (sum d_c) × r
-                k = ks[sid_int]                   # (sum d_c,)
+                sid_int = av.variableID              # super variableID (int)
+                s_id = int2sid.get(sid_int, str(sid_int))  # super string id (also the abs node id)
+                B = Bs[sid_int]                       # (sum d_c) × r
+                k = ks[sid_int]                       # (sum d_c,)
 
-                A_sup = parent["A"][s_id]         # 形状 2 × (sum d_c)
-                b_sup = parent["b"][s_id]         # 形状 (2,)
+                A_sup = parent["A"][s_id]             # shape 2 × (sum d_c)
+                b_sup = parent["b"][s_id]             # shape (2,)
 
-                L["A"][s_id] = A_sup @ B          # 2 × r
-                L["b"][s_id] = A_sup @ k + b_sup  # 2,
+                L["A"][s_id] = A_sup @ B              # 2 × r
+                L["b"][s_id] = A_sup @ k + b_sup      # 2,
 
         else:
-            # 未知层类型
+            # Unknown layer type
             L["A"], L["b"] = {}, {}
 
-    # ---------- 2) 计算 gbp_result ----------
+    # ---------- 2) Compute gbp_result ----------
     for li, L in enumerate(layers):
         g = L.get("graph")
         if g is None:
@@ -1266,8 +1268,8 @@ def refresh_gbp_results(layers):
                 res[vid] = v.mu[:2].tolist()
 
         elif name.startswith("super"):
-            # 直接用 A_super, b_super 映射
-            # nodes 顺序与 var_nodes 顺序一致
+            # Directly use A_super, b_super mapping
+            # nodes order is consistent with var_nodes order
             for i, v in enumerate(g.var_nodes):
                 s_id = str(L["nodes"][i]["data"]["id"])
                 A, b = L["A"][s_id], L["b"][s_id]   # A: 2×(sum d_c)
@@ -1275,9 +1277,9 @@ def refresh_gbp_results(layers):
 
         elif name.startswith("abs"):
             parent = layers[li - 1]
-            # 同样用字符串 id 对齐
+            # Also align via string ids
             for i, v in enumerate(g.var_nodes):
-                a_id = str(L["nodes"][i]["data"]["id"])  # 与 super 的 s_id 相同文本
+                a_id = str(L["nodes"][i]["data"]["id"])  # same text as the super s_id
                 A, b = L["A"][a_id], L["b"][a_id]        # A: 2×r
                 res[a_id] = (A @ v.mu + b).tolist()
 
@@ -1285,12 +1287,13 @@ def refresh_gbp_results(layers):
 
 
 
+
 def vloop(layers):
     """
-    简化版 V-cycle:
-    1. bottom-up: base/super/abs 层依次 rebuild 并迭代一次
-    2. top-down : super -> base 回传 mu
-    3. 每层刷新 gbp_result 供 UI 使用
+    Simplified V-cycle:
+    1) bottom-up: rebuild and iterate once for base / super / abs in order
+    2) top-down: propagate mu from super -> base
+    3) refresh gbp_result on each layer for UI use
     """
 
     # ---- bottom-up ----
@@ -1298,37 +1301,39 @@ def vloop(layers):
         layers[0]["graph"].synchronous_iteration()
 
     for i in range(1, len(layers)):
-        # 每一层迭代一次后rebuild
+        # After one iteration per layer, rebuild
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
 
         name = layers[i]["name"]
         if name.startswith("super"):
-            # 用前一层的 graph 更新 super
+            # Update super using the previous layer's graph
             # layers[i]["graph"] = build_super_graph(layers[:i+1])
             bottom_up_modify_super_graph(layers[:i+1])
 
         elif name.startswith("abs"):
-            # 用前一层 super 重建 abs
+            # Rebuild abs using the previous super
             abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=2)
             layers[i]["graph"] = abs_graph
             layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
-    # ---- top-down (传 mu) ----
+    # ---- top-down (pass mu) ----
     for i in range(len(layers) - 1, 0, -1):
-        # 每一层迭代一次后reproject
+        # After one iteration per layer, reproject
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
         name = layers[i]["name"]
         if name.startswith("super"):
-            # 把 super 的 mu 拆回 base/abs
+            # Split super.mu back to base/abs
             top_down_modify_base_and_abs_graph(layers[:i+1])
         elif name.startswith("abs"):
-            # 把 abs 的 mu 投影回 super
+            # Project abs.mu back to super
             top_down_modify_super_graph(layers[:i+1])
+
 
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
+
 
 
 # -----------------------
