@@ -867,12 +867,6 @@ def build_abs_graph(
         return meas_fn_super_between, jac_fn_super_between, sup_factor.measurement, sup_factor.measurement_lambda
     
 
-    def project_msg(msg, B):
-        # super msg -> abs msg ： Lam_a = B^T Lam_s B,  Eta_a = B^T Eta_s
-        Lam_a = B.T @ msg.lam @ B
-        Eta_a = B.T @ msg.eta
-        return Eta_a, Lam_a
-
     for f in sup_fg.factors:
         if len(f.adj_var_nodes) == 1:
             meas_fn, jac_fn, z, z_lambda = make_abs_prior_factor(f)
@@ -883,18 +877,6 @@ def build_abs_graph(
 
             lin0 = v.mu
             abs_f.compute_factor(linpoint=lin0, update_self=True)
-
-            # 处理让messages也一致
-            sv = f.adj_var_nodes[0]     # super 变量
-            s_msg = f.messages[0]       # super -> var 的旧消息（索引 0）
-            if s_msg is not None:
-                sid = sv.variableID
-                B = Bs[sid]
-                eta_a, lam_a = project_msg(s_msg, B)
-                # 直接写到 abs_f.messages[0]
-                abs_f.messages[0].eta = eta_a.copy()
-                abs_f.messages[0].lam = lam_a.copy()
-
 
             abs_fg.factors.append(abs_f)
             v.adj_factors.append(abs_f)
@@ -909,25 +891,6 @@ def build_abs_graph(
 
             lin0 = np.concatenate([vi.mu, vj.mu])
             abs_f.compute_factor(linpoint=lin0, update_self=True)
-
-            sv_i, sv_j = f.adj_var_nodes   # super 两端变量
-            # super 的消息按同样的索引顺序存着：f.messages[0] 对应 sv_i，f.messages[1] 对应 sv_j
-            s_msg_i = f.messages[0]
-            s_msg_j = f.messages[1]
-            # i 端
-            if s_msg_i is not None:
-                si = sv_i.variableID
-                Bi = Bs[si]
-                eta_ai, lam_ai = project_msg(s_msg_i, Bi)
-                abs_f.messages[0].eta = eta_ai.copy()
-                abs_f.messages[0].lam = lam_ai.copy()
-            # j 端
-            if s_msg_j is not None:
-                sj = sv_j.variableID
-                Bj = Bs[sj]
-                eta_aj, lam_aj = project_msg(s_msg_j, Bj)
-                abs_f.messages[1].eta = eta_aj.copy()
-                abs_f.messages[1].lam = lam_aj.copy()
 
             abs_fg.factors.append(abs_f)
             vi.adj_factors.append(abs_f)
@@ -969,13 +932,14 @@ def bottom_up_modify_super_graph(layers):
             old_belief = v.belief
 
             # 1. 更新 mu
-            v.mu = mu_super
+            #v.mu = mu_super
 
             # 2. 新 belief（用旧 Sigma + 新 mu）
-            lam = np.linalg.inv(v.Sigma)
-            eta = lam @ v.mu
-            new_belief = NdimGaussian(v.dofs, eta, lam)
-            v.belief = new_belief
+            #lam = np.linalg.inv(v.Sigma)
+            #eta = lam @ v.mu
+            #new_belief = NdimGaussian(v.dofs, eta, lam)
+            #v.belief = new_belief
+            #v.prior = NdimGaussian(v.dofs)
 
 
         """
@@ -1040,10 +1004,10 @@ def top_down_modify_base_and_abs_graph(layers):
             v.mu = mu_child
 
             # 2. new belief（keep Σ unchanged，use new mu）
-            lam = np.linalg.inv(v.Sigma)
-            eta = lam @ v.mu
-            new_belief = NdimGaussian(v.dofs, eta, lam)
+            eta = v.belief.lam @ v.mu
+            new_belief = NdimGaussian(v.dofs, eta, v.belief.lam)
             v.belief = new_belief
+            v.prior = NdimGaussian(v.dofs, 0.1*v.mu, 0.1*np.eye(v.dofs))
 
 
             # 3. 同步到相邻 factor (this step is important)
@@ -1052,8 +1016,6 @@ def top_down_modify_base_and_abs_graph(layers):
                 d_eta = new_belief.eta - old_belief.eta
                 d_lam = new_belief.lam - old_belief.lam
 
-                if np.linalg.norm(d_lam) > 0:
-                    a +=1
                 for f in v.adj_factors:
                     if v in f.adj_var_nodes:
                         idx = f.adj_var_nodes.index(v)
@@ -1061,8 +1023,8 @@ def top_down_modify_base_and_abs_graph(layers):
                         f.adj_beliefs[idx] = new_belief
                         # correct coresponding message
                         msg = f.messages[idx]
-                        msg.eta += d_eta / n_adj
-                        msg.lam += d_lam / n_adj
+                        msg.eta += 0.1*d_eta / n_adj
+                        msg.lam += 0.1*d_lam / n_adj
                         f.messages[idx] = msg
 
     return base_graph
@@ -1079,7 +1041,6 @@ def top_down_modify_super_graph(layers):
       - Factors at the abs level and the super level share the same factorID (one-to-one)
       - The columns of B are orthonormal (from covariance eigenvectors; eigenvectors from np.linalg.eigh are orthogonal)
     """
-    import numpy as np
 
     abs_graph   = layers[-1]["graph"]
     super_graph = layers[-2]["graph"]
@@ -1101,17 +1062,13 @@ def top_down_modify_super_graph(layers):
 
         # x_s = B x_a + k; Σ_s = B Σ_a Bᵀ + k2
         mu_a    = abs_graph.var_nodes[sid].mu
-        Sigma_a = abs_graph.var_nodes[sid].Sigma
         mu_s    = B @ mu_a + k
-        Sigma_s = B @ Sigma_a @ B.T + k2
-
         sn.mu     = mu_s
-        sn.Sigma  = Sigma_s
+
 
         # Refresh super belief (natural parameters) with the new μ and Σ
-        lam = np.linalg.inv(sn.Sigma)
-        eta = lam @ sn.mu
-        new_belief = NdimGaussian(sn.dofs, eta, lam)
+        eta = sn.belief.lam @ sn.mu
+        new_belief = NdimGaussian(sn.dofs, eta, sn.belief.lam)
         sn.belief  = new_belief
 
     # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
@@ -1120,57 +1077,10 @@ def top_down_modify_super_graph(layers):
     #   Λ_s_new = B Λ_a Bᵀ + (I - B Bᵀ) Λ_s_old (I - B Bᵀ)
     # This ensures the subspace is governed by the abs message, while the orthogonal complement keeps the old super message.
     for sn in super_graph.var_nodes:
-        sid = sn.variableID
-        if sid not in Bs:
-            continue
-        B  = Bs[sid]                         # (d_s × r)
-        dS = sn.dofs
-        I  = np.eye(dS)
-        # BBᵀ is the orthogonal projector to the subspace (columns of B come from eigenvectors and are orthogonal)
-        P_sub = B @ B.T
-        P_ort = I - P_sub                    # Orthogonal-complement projector
-
         # Iterate over super factors adjacent to this super variable
         for f_sup in sn.adj_factors:
-            # Locate the index of this variable on the super factor
-            try:
-                idx_side = f_sup.adj_var_nodes.index(sn)
-            except ValueError:
-                continue
-
-            # Find the corresponding abs factor (same factorID)
-            f_abs = abs_f_by_id.get(f_sup.factorID, None)
-            if f_abs is None:
-                # Skip if there is no corresponding abs factor
-                continue
-
-            # In the abs factor, the side index matches the super one (you keep the order consistent in build_abs_graph)
-            msg_a = f_abs.messages[idx_side]
-            msg_s = f_sup.messages[idx_side]
-            if msg_a is None or msg_s is None:
-                # Some messages may not have been initialized yet
-                continue
-
-            # —— Project message natural parameters —— #
-            # abs → super subspace
-            eta_s_sub = B @ msg_a.eta               # (d_s,)
-            lam_s_sub = B @ msg_a.lam @ B.T         # (d_s × d_s)
-
-            # Keep the old super message on the orthogonal complement
-            eta_s_ort = P_ort @ msg_s.eta
-            lam_s_ort = P_ort @ msg_s.lam @ P_ort
-
-            eta_s_new = eta_s_sub + eta_s_ort
-            lam_s_new = lam_s_sub + lam_s_ort
-            # Symmetrize numerically to avoid accumulated error
-            lam_s_new = 0.5 * (lam_s_new + lam_s_new.T)
-
-            # Write back to the message at the corresponding side of the super factor
-            msg_s.eta = eta_s_new
-            msg_s.lam = lam_s_new
-            f_sup.messages[idx_side] = msg_s
-
-            # Also update the factor's recorded adjacent belief on that side (optional; usually refreshed in the next iteration)
+            idx_side = f_sup.adj_var_nodes.index(sn)
+            # update the factor's recorded adjacent belief on that side (optional; usually refreshed in the next iteration)
             f_sup.adj_beliefs[idx_side] = sn.belief
 
     return
@@ -1299,9 +1209,10 @@ def vloop(layers):
     # ---- bottom-up ----
     if layers and "graph" in layers[0]:
         layers[0]["graph"].synchronous_iteration()
-
+        layers[0]["graph"].synchronous_iteration()   # this is also very important, but dont know why
+        
     for i in range(1, len(layers)):
-        # After one iteration per layer, rebuild
+        # After build, one iteration per layer
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
 
@@ -1317,11 +1228,13 @@ def vloop(layers):
             layers[i]["graph"] = abs_graph
             layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
+
     # ---- top-down (pass mu) ----
     for i in range(len(layers) - 1, 0, -1):
-        # After one iteration per layer, reproject
+        # After two iterations per layer, reproject
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
+            layers[i]["graph"].synchronous_iteration()    # this is very important, but dont know why
         name = layers[i]["name"]
         if name.startswith("super"):
             # Split super.mu back to base/abs
