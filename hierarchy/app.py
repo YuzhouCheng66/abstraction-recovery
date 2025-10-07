@@ -1634,7 +1634,7 @@ from dash import no_update
     Input("gbp-interval", "n_intervals"),
     Input("vcycle-run", "n_clicks"),
     Input("vcycle-interval", "n_intervals"),
-    Input("project-layer", "n_clicks"),       # ✅ New: Project Layer
+    Input("project-layer", "n_clicks"),       # ✅ New: project layer
     Input("new-graph", "n_clicks"),           # ✅ Unified emergency stop remains
     State("gbp-state", "data"),
     State("vcycle-state", "data"),
