@@ -907,7 +907,7 @@ def bottom_up_modify_super_graph(layers):
     Update super-node means (mu) from base nodes,
     and simultaneously adjust variable beliefs and adjacent messages.
     """
-    
+
     base_graph = layers[-2]["graph"]
     super_graph = layers[-1]["graph"]
     node_map = layers[-1]["node_map"]
@@ -1065,13 +1065,13 @@ def top_down_modify_super_graph(layers):
         # x_s = B x_a + k; Σ_s = B Σ_a Bᵀ + k2
         mu_a    = abs_graph.var_nodes[sid].mu
         mu_s    = B @ mu_a + k
-        sn.mu     = mu_s
-
+        sn.mu   = mu_s
 
         # Refresh super belief (natural parameters) with the new μ and Σ
         eta = sn.belief.lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, sn.belief.lam)
         sn.belief  = new_belief
+        #sn.prior = NdimGaussian(sn.dofs, 0.01*sn.mu, 0.01*np.eye(sn.dofs))
 
     # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
     # Idea: for the side of the super factor f_sup connected to variable sid:
@@ -1218,10 +1218,14 @@ def vloop(layers):
             layers[i]["graph"].synchronous_iteration()
 
         name = layers[i]["name"]
-        if name.startswith("super"):
+        if name.startswith("super1"):
             # Update super using the previous layer's graph
             # layers[i]["graph"] = build_super_graph(layers[:i+1])
             bottom_up_modify_super_graph(layers[:i+1])
+
+        elif name.startswith("super"):
+            # Update super using the previous layer's graph
+            layers[i]["graph"] = build_super_graph(layers[:i+1])
 
         elif name.startswith("abs"):
             # Rebuild abs using the previous super
@@ -1235,7 +1239,6 @@ def vloop(layers):
         # After two iterations per layer, reproject
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
-
         # this is very important, but dont know why yet
         # so abs layer need more iterations
         if name.startswith("abs"):
@@ -1308,7 +1311,7 @@ app.layout = html.Div([
                     {"label":"K-Means","value":"kmeans"},
                     {"label":"Order","value":"order"}
                 ],
-                value="kmeans", clearable=False, className="mode-dd",
+                value="order", clearable=False, className="mode-dd",
                 style={"width":"120px","height":"26px","display":"inline-block","marginRight":"12px"}
             ),
             html.Span("Gx:", style={"marginRight":"6px"}),
