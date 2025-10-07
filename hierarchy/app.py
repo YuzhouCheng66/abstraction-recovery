@@ -1448,9 +1448,9 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
     if triggered == "new-graph":
         if seed is None or seed == 0:
-            rng = np.random.default_rng()        # 随机初始化
+            rng = np.random.default_rng()        # Random initialization
         else:
-            rng = np.random.default_rng(seed)    # 固定 seed
+            rng = np.random.default_rng(seed)    # Fixed seed
         N = int(pN or 100)
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
@@ -1459,7 +1459,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         layers = init_layers(N, step, prob, radius, prior_prop, rng=rng)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
-        # 构建 GBP 图（此时渲染仍显示 GT）
+        # Build the GBP graph (rendering still shows GT at this point)
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
                                            odom_sigma=float(pOdom or 1.0)
@@ -1504,8 +1504,9 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
     opts=[{"label":L["name"],"value":L["name"]} for L in layers]
     return opts, layers[-1]["name"]
 
+
 # -----------------------
-# 渲染 Cytoscape（含实时覆盖 base 层位姿）
+# Render Cytoscape (including real-time overlay of base-layer poses)
 # -----------------------
 @app.callback(
     Output("cytoscape","elements"),
@@ -1518,7 +1519,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
     State("param-N","value"),
 )
 def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
-    # 找到当前 layer
+    # Find the current layer
     layer = next((l for l in layers if l["name"] == layer_name), None)
     if layer is None:
         return [], [], {"name": "preset"}
@@ -1526,12 +1527,12 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
     orig_nodes, edges = layer["nodes"], layer["edges"]
     edges = [e for e in edges if e["data"].get("target") != "prior"]
 
-    # 当前层的 GBP 解算结果（如果有）
+    # GBP solution for the current layer (if available)
     result = layer.get("gbp_result", None)
 
     nodes = []
     base_count = len(layers[0]["nodes"]) if layers else 1
-    alpha = 0.3  # <1 → 前期变快，后期变慢
+    alpha = 0.3  # <1 → Faster in the early stage, slower in the later stage
 
     for n in orig_nodes:
         new_n = {
@@ -1539,7 +1540,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
             "position": dict(n["position"])
         }
 
-        # 应用 GBP 更新的位姿
+        # Apply GBP-updated pose
         if result and new_n["data"]["id"] in result:
             mu = result[new_n["data"]["id"]]
             new_n["position"]["x"] = float(mu[0])
@@ -1547,20 +1548,20 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
 
         nb = int(new_n["data"].get("num_base", 1))
 
-        # ==== 颜色值 (幂次缩放) ====
+        # ==== Color value (power scaling) ====
         color_val = float(((nb / base_count) ** alpha) * base_count)
         new_n["data"]["color_val"] = color_val
 
-        # ==== 原始半径 ====
+        # ==== Linear radius ====
         size_linear = 4
 
-        # ==== 对数缩放半径 ====
+        # ==== Log-scaled radius ====
         size_val = float(size_linear * (np.log(1 + nb*500/param_N) / np.log(4)))
         new_n["data"]["size_val"] = size_val
 
         nodes.append(new_n)
 
-    # 坐标轴
+    # Axes
     axis_nodes = [
         {"data": {"id": "x_axis_start"}, "position": {"x": float(GLOBAL_XMIN_ADJ - AXIS_PAD), "y": 0}, "classes": "axis-node"},
         {"data": {"id": "x_axis_end"},   "position": {"x": float(GLOBAL_XMAX_ADJ + AXIS_PAD), "y": 0}, "classes": "axis-node"},
@@ -1584,12 +1585,12 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
             "label": label_style,
             "font-size": 8,
             "text-valign": "top",
-            "border-width": f"mapData(size_val,1,20,0.2,1.0)",   # size_val 小=0.2px，大=1px
-            "border-color": "rgba(0,0,0,0)"                   # 柔和灰边
+            "border-width": f"mapData(size_val,1,20,0.2,1.0)",   # size_val small → 0.2px, large → 1px
+            "border-color": "rgba(0,0,0,0)"                   # soft gray border
         }},
 
         {"selector": "edge", "style": {
-            "line-color": "rgba(136,136,136,0.1)",  # #888 ≈ (136,136,136)，透明度 0.1 = 90% 透明
+            "line-color": "rgba(136,136,136,0.1)",  # #888 ≈ (136,136,136), alpha 0.1 ≈ 90% transparent
             "width": 0.9
         }},
         {"selector": ".axis", "style": {
@@ -1610,10 +1611,9 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
 
 
 # -----------------------
-# 合并的 GBP 回调（按钮 + interval + new-graph 急停）
+# Merged GBP callback (button + interval + new-graph emergency stop)
 # -----------------------
 from dash import no_update
-
 
 @app.callback(
     Output("gbp-poses", "data"),
@@ -1629,8 +1629,8 @@ from dash import no_update
     Input("gbp-interval", "n_intervals"),
     Input("vcycle-run", "n_clicks"),
     Input("vcycle-interval", "n_intervals"),
-    Input("project-layer", "n_clicks"),       # ✅ 新增：Project Layer
-    Input("new-graph", "n_clicks"),           # ✅ 统一急停仍保留
+    Input("project-layer", "n_clicks"),       # ✅ New: Project Layer
+    Input("new-graph", "n_clicks"),           # ✅ Unified emergency stop remains
     State("gbp-state", "data"),
     State("vcycle-state", "data"),
     State("param-iters","value"),
@@ -1640,7 +1640,7 @@ from dash import no_update
 )
 def unified_solver(gbp_click, gbp_ticks,
                    vcycle_click, vcycle_ticks,
-                   project_click,                    # ✅ 新增入参
+                   project_click,                    # ✅ Adds an argument
                    new_graph_click,
                    gbp_state, vcycle_state,
                    iters, snap_int, current_layer):
@@ -1660,7 +1660,7 @@ def unified_solver(gbp_click, gbp_ticks,
 
     # ==== Project Layer ====
     if trig.startswith("project-layer"):
-        # 定位当前层
+        # locate the current layer
         try:
             idx = next(i for i, L in enumerate(layers) if L["name"] == current_layer)
         except StopIteration:
@@ -1687,7 +1687,7 @@ def unified_solver(gbp_click, gbp_ticks,
             # base has no lower layer
             msg = "Base layer has no lower layer to project to."
 
-        # 刷新并返回当前层位姿（触发 Cytoscape 重绘）
+        # Refresh and return the current layer poses (triggers Cytoscape redraw)
         refresh_gbp_results(layers)
         latest_positions = layers[idx].get("gbp_result", None)
         return latest_positions, msg, gbp_state, True, no_update, \
