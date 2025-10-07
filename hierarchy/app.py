@@ -5,7 +5,7 @@ import dash_cytoscape as cyto
 import numpy as np
 from scipy.linalg import block_diag
 
-# ==== GBP 引入 ====
+# ==== GBP import ====
 from gbp.gbp import *
 
 app = dash.Dash(__name__)
@@ -98,7 +98,7 @@ def fuse_to_super_grid(prev_nodes, prev_edges, gx, gy, layer_idx):
                 "id": nid,
                 "layer": layer_idx,
                 "dim": dim_val,
-                "num_base": num_val   # 继承总和
+                "num_base": num_val   # Inherit the sum
             },
             "position": {"x": float(mean_x), "y": float(mean_y)}
         })
@@ -173,7 +173,7 @@ def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol
         if moved < tol:
             break
 
-    # final assign (redo once to be safe)
+    # Final assign (redo once to be safe)
     d2 = ((positions[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
     assign = np.argmin(d2, axis=1)
 
@@ -244,7 +244,7 @@ def copy_to_abs(super_nodes, super_edges, layer_idx):
                 "id": nid,
                 "layer": layer_idx,
                 "dim": n["data"]["dim"],
-                "num_base": n["data"].get("num_base", 1)  # 继承
+                "num_base": n["data"].get("num_base", 1)  # Inherit
             },
             "position": {"x": n["position"]["x"], "y": n["position"]["y"]}
         })
@@ -352,6 +352,7 @@ def highest_pair_idx(names):
         kind, k = parse_layer_name(nm)
         if kind in ("super","abs"): hi = max(hi, k)
     return hi
+
 
 # -----------------------
 # Initialization & Boundary
@@ -927,13 +928,13 @@ def bottom_up_modify_super_graph(layers):
             idx = sid2idx[sid]
             v = super_graph.var_nodes[idx]
 
-            # 旧的 belief
+            # Old belief
             old_belief = v.belief
 
-            # 1. 更新 mu
+            # 1. Update mu
             #v.mu = mu_super
 
-            # 2. 新 belief（用旧 Sigma + 新 mu）
+            # 2. New belief (use old Sigma + new mu)
             #lam = np.linalg.inv(v.Sigma)
             #eta = lam @ v.mu
             #new_belief = NdimGaussian(v.dofs, eta, lam)
