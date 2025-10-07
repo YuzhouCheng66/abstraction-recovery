@@ -809,7 +809,7 @@ def build_abs_graph(
         varis_abs_mu = B_reduced.T @ varis_sup_mu          # Projected natural mean: shape (2,)
         varis_abs_sigma = B_reduced.T @ varis_sup_sigma @ B_reduced  # Projected covariance: shape (2, 2)
         ks[sid] = varis_sup_mu - B_reduced @ varis_abs_mu  # Store the mean offset for this variable
-        k2s[sid] = varis_sup_sigma - B_reduced @ varis_abs_sigma @ B_reduced.T  # Residual covariance
+        #k2s[sid] = varis_sup_sigma - B_reduced @ varis_abs_sigma @ B_reduced.T  # Residual covariance
 
         varis_abs_lam = np.linalg.inv(varis_abs_sigma)  # Inverse covariance (precision matrix): shape (2, 2)
         varis_abs_eta = varis_abs_lam @ varis_abs_mu  # Natural parameters: shape (2,)
@@ -904,9 +904,10 @@ def build_abs_graph(
 
 def bottom_up_modify_super_graph(layers):
     """
-    用 base 节点更新 super 节点的均值 (mu)，
-    并同步修正 variable belief 与相邻 message。
+    Update super-node means (mu) from base nodes,
+    and simultaneously adjust variable beliefs and adjacent messages.
     """
+    
     base_graph = layers[-2]["graph"]
     super_graph = layers[-1]["graph"]
     node_map = layers[-1]["node_map"]
@@ -1047,10 +1048,10 @@ def top_down_modify_super_graph(layers):
     super_graph = layers[-2]["graph"]
     Bs  = layers[-1]["Bs"]   # { super_id(int) -> B (d_super × r) }
     ks  = layers[-1]["ks"]   # { super_id(int) -> k (d_super,) }
-    k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance (d_super × d_super) }
+    #k2s = layers[-1]["k2s"]  # { super_id(int) -> residual covariance (d_super × d_super) }
 
     # Prebuild abs factor index: factorID -> Factor
-    abs_f_by_id = {f.factorID: f for f in getattr(abs_graph, "factors", [])}
+    #abs_f_by_id = {f.factorID: f for f in getattr(abs_graph, "factors", [])}
 
     # ---- First project variables' mu / Sigma and update beliefs ----
     for sn in super_graph.var_nodes:
@@ -1059,7 +1060,7 @@ def top_down_modify_super_graph(layers):
             continue
         B  = Bs[sid]    # (d_s × r)
         k  = ks[sid]    # (d_s,)
-        k2 = k2s[sid]   # (d_s × d_s)
+        #k2 = k2s[sid]   # (d_s × d_s)
 
         # x_s = B x_a + k; Σ_s = B Σ_a Bᵀ + k2
         mu_a    = abs_graph.var_nodes[sid].mu
