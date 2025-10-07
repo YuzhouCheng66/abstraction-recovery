@@ -3,6 +3,7 @@ import dash
 from dash import html, dcc, Input, Output, State, no_update
 import dash_cytoscape as cyto
 import numpy as np
+from scipy.linalg import block_diag
 
 # ==== GBP 引入 ====
 from gbp.gbp import *
@@ -130,7 +131,7 @@ def fuse_to_super_grid(prev_nodes, prev_edges, gx, gy, layer_idx):
     return super_nodes, super_edges, node_map
 
 # -----------------------
-# K-Means 聚合
+# K-Means aggregation
 # -----------------------
 def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol=1e-6, seed=0):
     positions = np.array([[n["position"]["x"], n["position"]["y"]] for n in prev_nodes], dtype=float)
@@ -140,24 +141,24 @@ def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol
     k = min(k, n)
     rng = np.random.default_rng(seed)
 
-    # -------- 改进版初始化 --------
-    # 随机无放回抽 k 个点，保证一开始每簇有独立的点
+    # -------- Improved initialization --------
+    # Randomly sample k points without replacement to ensure each cluster starts with a distinct point
     init_idx = rng.choice(n, size=k, replace=False)
     centers = positions[init_idx]
 
-    # Lloyd 迭代
+    # Lloyd iterations
     for _ in range(max_iters):
         d2 = ((positions[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
         assign = np.argmin(d2, axis=1)
 
-        # -------- 空簇修补 --------
+        # -------- Empty-cluster fix --------
         counts = np.bincount(assign, minlength=k)
         empty_clusters = np.where(counts == 0)[0]
         for ci in empty_clusters:
-            # 找到最大簇
+            # Find the largest cluster
             big_cluster = np.argmax(counts)
             big_idxs = np.where(assign == big_cluster)[0]
-            # 偷一个点过来
+            # Steal one point over
             steal_idx = big_idxs[0]
             assign[steal_idx] = ci
             counts[big_cluster] -= 1
@@ -172,7 +173,7 @@ def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol
         if moved < tol:
             break
 
-    # final assign (再做一次保证)
+    # final assign (redo once to be safe)
     d2 = ((positions[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
     assign = np.argmin(d2, axis=1)
 
@@ -186,7 +187,7 @@ def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol
         counts[big_cluster] -= 1
         counts[ci] += 1
 
-    # ---------- 构造 super graph ----------
+    # ---------- Build the super graph ----------
     super_nodes, node_map = [], {}
     for ci in range(k):
         idxs = np.where(assign == ci)[0]
@@ -202,7 +203,7 @@ def fuse_to_super_kmeans(prev_nodes, prev_edges, k, layer_idx, max_iters=20, tol
                 "id": nid,
                 "layer": layer_idx,
                 "dim": dim_val,
-                "num_base": num_val   # 继承总和
+                "num_base": num_val   # Inherit the sum
             },
             "position": {"x": float(mean_x), "y": float(mean_y)}
         })
@@ -256,33 +257,33 @@ def copy_to_abs(super_nodes, super_edges, layer_idx):
     return abs_nodes, abs_edges
 
 # -----------------------
-# 顺序合并（尾组吞余数）
+# Sequential merge (tail group absorbs remainder)
 # -----------------------
 def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
     """
-    顺序把 prev_nodes 按当前顺序切成 k 组，最后一组吞余数（tail_heavy=True）。
-    复用现有的维度/num_base 聚合与边去重、prior 传递规则。
+    Sequentially split prev_nodes in current order into k groups; the last group absorbs the remainder (tail_heavy=True).
+    Reuse existing rules for aggregating dim/num_base, deduplicating edges, and propagating prior.
     """
     n = len(prev_nodes)
     if k <= 0: k = 1
     k = min(k, n)
 
-    # 组尺寸
+    # Group sizes
     base = n // k
     rem  = n %  k
     if tail_heavy:
-        sizes = [base]*(k-1) + [base+rem]     # 尾部吞余数：..., last += rem
+        sizes = [base]*(k-1) + [base+rem]     # Tail absorbs remainder: ..., last += rem
     else:
-        sizes = [base+1]*rem + [base]*(k-rem) # 平均摊余数（可选）
+        sizes = [base+1]*rem + [base]*(k-rem) # Evenly distribute remainder (optional)
 
-    # 构组：记录每组索引
+    # Build groups: record indices per group
     groups = []
     start = 0
     for s in sizes:
         groups.append(list(range(start, start+s)))
         start += s
 
-    # ---- 构造 super_nodes & node_map ----
+    # ---- Build super_nodes & node_map ----
     positions = np.array([[n["position"]["x"], n["position"]["y"]] for n in prev_nodes], dtype=float)
 
     super_nodes, node_map = [], {}
@@ -295,7 +296,7 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
         dim_val = int(max(1, sum(child_dims)))
         num_val = int(sum(child_nums))
 
-        nid = f"{gi}"  # 与 kmeans 一致：用组号作 id（字符串）
+        nid = f"{gi}"  # Same as kmeans: use group index as id (string)
         super_nodes.append({
             "data": {
                 "id": nid,
@@ -305,11 +306,11 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
             },
             "position": {"x": float(mean_x), "y": float(mean_y)}
         })
-        # 建立 base-id -> super-id 映射（注意你全程用字符串 id）
+        # Build base-id -> super-id mapping (note: ids are strings throughout)
         for i in idxs:
             node_map[prev_nodes[i]["data"]["id"]] = nid
 
-    # ---- 超边：跨组边保留且去重，组内边折成 prior；prior 边上卷到所属 super ----
+    # ---- Super edges: keep and deduplicate inter-group edges; intra-group edges collapse to prior; prior edges roll up to their owning super ----
     super_edges, seen = [], set()
     for e in prev_edges:
         u, v = e["data"]["source"], e["data"]["target"]
@@ -322,7 +323,7 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
                     super_edges.append({"data": {"source": su, "target": sv}})
                     seen.add(eid)
             else:
-                # 组内二元边 → 组先验（与 grid/kmeans 的处理保持一致）
+                # Intra-group pairwise edge → group prior (consistent with grid/kmeans handling)
                 eid = tuple(sorted((su, "prior")))
                 if eid not in seen:
                     super_edges.append({"data": {"source": su, "target": "prior"}})
@@ -338,7 +339,7 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
 
 
 # -----------------------
-# 工具
+# Tools
 # -----------------------
 def parse_layer_name(name):
     if name == "base": return ("base", 0)
@@ -353,7 +354,7 @@ def highest_pair_idx(names):
     return hi
 
 # -----------------------
-# 初始化 & 边界
+# Initialization & Boundary
 # -----------------------
 def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
     base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, rng)
@@ -385,16 +386,15 @@ def reset_global_bounds(base_nodes):
     GLOBAL_XMIN_ADJ,GLOBAL_XMAX_ADJ,GLOBAL_YMIN_ADJ,GLOBAL_YMAX_ADJ=adjust_bounds_to_aspect(
         GLOBAL_XMIN,GLOBAL_XMAX,GLOBAL_YMIN,GLOBAL_YMAX,ASPECT)
 
-# ==== 全局状态 ====
+# ==== Blobal Status ====
 layers = init_layers()
 pair_idx = 0
 reset_global_bounds(layers[0]["nodes"])
 gbp_graph = None
 
 # -----------------------
-# GBP Graph 构建
+# GBP Graph Construction
 # -----------------------
-
 def build_noisy_pose_graph(
     nodes,
     edges,
@@ -405,13 +405,13 @@ def build_noisy_pose_graph(
 ):
     
     """
-    构造二维 pose-only 因子图（线性，高斯），并注入噪声。
-    参数:
-      prior_sigma : 强先验的标准差（小=强）
-      odom_sigma  : 里程计测量噪声标准差
-      prior_prop  : 0.0=仅 anchor；(0,1)=按比例随机选；>=1.0=全体
-      tiny_prior  : 所有节点默认加的极小先验，防止奇异
-      seed        : 随机种子（可复现）
+    Construct a 2D pose-only factor graph (linear, Gaussian) and inject noise.
+    Parameters:
+      prior_sigma : standard deviation of the strong prior (smaller = stronger)
+      odom_sigma  : standard deviation of odometry measurement noise
+      prior_prop  : 0.0 = anchor only; (0,1) = randomly select by proportion; >=1.0 = all
+      tiny_prior  : a tiny prior added to all nodes to prevent singularity
+      seed        : random seed (for reproducibility)
     """
 
     fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
@@ -420,20 +420,20 @@ def build_noisy_pose_graph(
     I2 = np.eye(2, dtype=float)
     N = len(nodes)
 
-    # ---- 预生成噪声 ----
+    # ---- Pre-generate noise ----
     prior_noises = {}
     odom_noises = {}
 
     if rng is None:
         rng = np.random.default_rng()
 
-    # 为所有边生成噪声
+    # Generate noise for all edges
     for e in edges:
         src = e["data"]["source"]; dst = e["data"]["target"]
-        # 二元边
+        # Binary edge
         if dst != "prior":
             odom_noises[(int(src[:]), int(dst[:]))] = rng.normal(0.0, odom_sigma, size=2)
-        # 一元边（强先验）
+        # Unary edge (strong prior)
         elif dst == "prior":
             prior_noises[int(src[:])] = rng.normal(0.0, prior_sigma, size=2)
 
@@ -443,7 +443,7 @@ def build_noisy_pose_graph(
         v = VariableNode(i, dofs=2)
         v.GT = np.array([n["position"]["x"], n["position"]["y"]], dtype=float)
 
-        # 极小先验
+        # Tiny prior
         v.prior.lam = tiny_prior * I2
         v.prior.eta = np.zeros(2, dtype=float)
 
@@ -521,18 +521,17 @@ def build_noisy_pose_graph(
 
 def build_super_graph(layers):
     """
-    基于 layers[-2] 的 base graph, 和 layers[-1] 的 super 分组，构造 super graph。
-    要求: layers[-2]["graph"] 已经是构建好的基图（含 unary/binary 因子）。
-    layers[-1]["node_map"]: { base_node_id(str, 如 'b12') -> super_node_id(str) }
+    Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
+    Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
+    layers[-1]["node_map"]: { base_node_id (str, e.g., 'b12') -> super_node_id (str) }
     """
-    from scipy.linalg import block_diag
-    # ---------- 取出 base & super ----------
+    # ---------- Extract base & super ----------
     base_graph = layers[-2]["graph"]
     super_nodes = layers[-1]["nodes"]
     super_edges = layers[-1]["edges"]
     node_map    = layers[-1]["node_map"]   # 'bN' -> 'sX_...'
 
-    # base: id(int)->VariableNode，方便查 dofs 和 mu
+    # base: id(int) -> VariableNode, handy to query dofs and mu
     id2var = {vn.variableID: vn for vn in base_graph.var_nodes}
 
     # ---------- super_id -> [base_id(int)] ----------
@@ -542,7 +541,7 @@ def build_super_graph(layers):
         super_groups.setdefault(s_id, []).append(b_int)
 
 
-    # ---------- 为每个 super 组建立 (start, dofs) 表 ----------
+    # ---------- For each super group, build a (start, dofs) table ----------
     # local_idx[sid][bid] = (start, dofs), total_dofs[sid] = sum(dofs)
     local_idx   = {}
     total_dofs  = {}
@@ -556,7 +555,7 @@ def build_super_graph(layers):
         total_dofs[sid] = off
 
 
-    # ---------- 创建 super VariableNodes ----------
+    # ---------- Create super VariableNodes ----------
     fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
 
     super_var_nodes = {}
@@ -566,7 +565,7 @@ def build_super_graph(layers):
 
         v = VariableNode(i, dofs=dofs)
 
-        # === 叠加 base GT ===
+        # === Stack base GT ===
         gt_vec = np.zeros(dofs)
         for bid, (st, d) in local_idx[sid].items():
             gt_base = getattr(id2var[bid], "GT", None)
@@ -580,7 +579,7 @@ def build_super_graph(layers):
         super_var_nodes[sid] = v
         fg.var_nodes.append(v)
 
-        # === 叠加 base belief ===
+        # === Stack base belief ===
         mu_blocks = []
         Sigma_blocks = []
         for bid, (st, d) in local_idx[sid].items():
@@ -599,7 +598,7 @@ def build_super_graph(layers):
 
     fg.n_var_nodes = len(fg.var_nodes)
 
-    # ---------- 工具：拼接某组的 linpoint（用 base belief 均值） ----------
+    # ---------- Utility: assemble a group's linpoint (using base belief means) ----------
     def make_linpoint_for_group(sid):
         x = np.zeros(total_dofs[sid])
         for bid, (st, d) in local_idx[sid].items():
@@ -609,13 +608,13 @@ def build_super_graph(layers):
             x[st:st+d] = mu
         return x
 
-    # ---------- 3) super prior（in_group unary + in_group binary） ----------
+    # ---------- 3) super prior (in-group unary + in-group binary) ----------
     def make_super_prior_factor(sid, base_factors):
         group = super_groups[sid]
         idx_map = local_idx[sid]
         ncols = total_dofs[sid]
 
-        # 选出：所有变量都在组内的因子（unary 或 binary）
+        # Select factors whose variables are all within the group (unary or binary)
         in_group = []
         for f in base_factors:
             vids = [v.variableID for v in f.adj_var_nodes]
@@ -626,7 +625,7 @@ def build_super_graph(layers):
             meas_fn = []
             for f in in_group:
                 vids = [v.variableID for v in f.adj_var_nodes]
-                # 拼本因子的局部 x
+                # Assemble this factor's local x
                 x_loc_list = []
                 for vid in vids:
                     st, d = idx_map[vid]
@@ -639,7 +638,7 @@ def build_super_graph(layers):
             Jrows = []
             for f in in_group:
                 vids = [v.variableID for v in f.adj_var_nodes]
-                # 构造本因子的局部 x，用于（潜在）非线性雅可比
+                # Build this factor's local x for (potentially) nonlinear Jacobian
                 x_loc_list = []
                 dims = []
                 for vid in vids:
@@ -649,7 +648,7 @@ def build_super_graph(layers):
                 x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
 
                 Jloc = f.jac_fn(x_loc)
-                # 将 Jloc 列块映射回 super 变量的列
+                # Map Jloc column blocks back to the super variable columns
                 row = np.zeros((Jloc.shape[0], ncols))
                 c0 = 0
                 for vid, d in zip(vids, dims):
@@ -660,7 +659,7 @@ def build_super_graph(layers):
                 Jrows.append(row)
             return np.vstack(Jrows) if Jrows else np.zeros((0, ncols))
 
-        # z_super：拼各 base 因子的 z
+        # z_super: concatenate each base factor's z
         z_list = [f.measurement for f in in_group]
         z_lambda_list = [f.measurement_lambda for f in in_group]
         z_super = np.concatenate(z_list) 
@@ -668,7 +667,7 @@ def build_super_graph(layers):
 
         return meas_fn_super_prior, jac_fn_super_prior, z_super, z_super_lambda 
 
-    # ---------- 4) super between（cross_group binary） ----------
+    # ---------- 4) super between (cross-group binary) ----------
     def make_super_between_factor(sidA, sidB, base_factors):
         groupA, groupB = super_groups[sidA], super_groups[sidB]
         idxA, idxB = local_idx[sidA], local_idx[sidB]
@@ -680,7 +679,7 @@ def build_super_graph(layers):
             if len(vids) != 2:
                 continue
             i, j = vids
-            # on side in A，the other side in B
+            # One side in A, the other side in B
             if (i in groupA and j in groupB) or (i in groupB and j in groupA):
                 cross.append(f)
 
@@ -963,10 +962,11 @@ def bottom_up_modify_super_graph(layers):
 
 def top_down_modify_base_and_abs_graph(layers):
     """
-    从 super graph 往下，把 mu 拆分给 base graph，
-    并同步修正 base variable 的 belief 与相邻 factor 的 adj_beliefs / messages。
+    From the super graph downward, split μ to the base graph,
+    and simultaneously update the base variables' beliefs and the adjacent factors'
+    adj_beliefs / messages.
 
-    假设 layers[-1] 是 super, layers[-2] 是 base。
+    Assume layers[-1] is the super layer and layers[-2] is the base layer.
     """
     super_graph = layers[-1]["graph"]
     base_graph = layers[-2]["graph"]
@@ -1010,7 +1010,7 @@ def top_down_modify_base_and_abs_graph(layers):
             v.prior = NdimGaussian(v.dofs, 0.1*v.mu, 0.1*np.eye(v.dofs))
 
 
-            # 3. 同步到相邻 factor (this step is important)
+            # 3. Sync to adjacent factors (this step is important)
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
                 d_eta = new_belief.eta - old_belief.eta
@@ -1209,7 +1209,6 @@ def vloop(layers):
     # ---- bottom-up ----
     if layers and "graph" in layers[0]:
         layers[0]["graph"].synchronous_iteration()
-        layers[0]["graph"].synchronous_iteration()   # this is also very important, but dont know why
         
     for i in range(1, len(layers)):
         # After build, one iteration per layer
@@ -1234,7 +1233,12 @@ def vloop(layers):
         # After two iterations per layer, reproject
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
-            layers[i]["graph"].synchronous_iteration()    # this is very important, but dont know why
+
+        # this is very important, but dont know why yet
+        # so abs layer need more iterations
+        if name.startswith("abs"):
+            layers[i]["graph"].synchronous_iteration()  
+
         name = layers[i]["name"]
         if name.startswith("super"):
             # Split super.mu back to base/abs
@@ -1248,13 +1252,12 @@ def vloop(layers):
     refresh_gbp_results(layers)
 
 
-
 # -----------------------
 # Layout
 # -----------------------
 app.layout = html.Div([
-    # ===== 顶部三行 =====
-    # 行1：基础图参数 + New Graph
+    # ===== Top three rows =====
+    # Row 1: Base graph parameters + New Graph
     html.Div([
         html.Div([
             html.Span("N:", style={"marginRight":"6px"}),
@@ -1292,7 +1295,7 @@ app.layout = html.Div([
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
-    # 行2：聚合参数 + Add Layer
+    # Row 2: Aggregation parameters + Add Layer
     html.Div([
         html.Div([
             html.Span("Mode:", style={"marginRight":"6px"}),
@@ -1326,7 +1329,7 @@ app.layout = html.Div([
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
-    # 行3：GBP 参数 + Project Layer
+    # Row 3: GBP parameters + Project Layer
     html.Div([
         html.Div([
             html.Span("prior σ:", style={"marginRight":"6px"}),
@@ -1347,16 +1350,16 @@ app.layout = html.Div([
         ], style={"flex":"1"}),
 
         html.Div([
-            # ✅ 正确的按钮 id
+            # ✅ Correct button id
             html.Button("Project Layer", id="project-layer", n_clicks=0,
                         style={"display":"block", "width":"120px"})
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
 
-    # 行4：Layer 工具条 + V Cycle（合并在一行）
+    # Row 4: Layer toolbar + V Cycle (combined in one line)
     html.Div([
-        # 左侧：Layer 选择 + 状态
+        # Left side: Layer selection + status
         html.Div([
             html.Span("Layer:", style={"marginRight":"6px"}),
             dcc.Dropdown(
@@ -1377,7 +1380,7 @@ app.layout = html.Div([
             "flex":"1"
         }),
 
-        # 右侧：V Cycle 按钮
+        # Right side: V Cycle button
         html.Div([
             html.Button("GBP Solver", id="gbp-run", n_clicks=0,
             
@@ -1386,7 +1389,7 @@ app.layout = html.Div([
     ], style={"display":"flex", "justifyContent":"space-between", "alignItems":"center", "margin":"6px 10px"}),
 
 
-    # 行5：V Cycle 控制
+    # Row 5: V Cycle controls    
     html.Div([
         html.Div([
             html.Button("V Cycle", id="vcycle-run", n_clicks=0,
@@ -1394,7 +1397,7 @@ app.layout = html.Div([
         ], style={"marginLeft":"20px", "flex":"0 0 auto"})
     ], style={"display":"flex", "justifyContent":"flex-end", "alignItems":"center", "margin":"6px 10px"}),
 
-    # 行6：层选择 + 状态（紧凑工具条）
+    # Row 6: Layer selection + status (compact toolbar)
     # Stores / Intervals / Cytoscape
     dcc.Store(id="gbp-state", data={"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}),
     dcc.Store(id="gbp-poses", data=None),
@@ -1681,7 +1684,7 @@ def unified_solver(gbp_click, gbp_ticks,
             top_down_modify_super_graph(layers[:idx+1])
             msg = f"Projected {current_layer} → super."
         else:
-            # base 无下层
+            # base has no lower layer
             msg = "Base layer has no lower layer to project to."
 
         # 刷新并返回当前层位姿（触发 Cytoscape 重绘）
