@@ -19,21 +19,21 @@ def make_slam_like_graph(N=100, grid_step=25, loop_prob=0.05, loop_radius=50, pr
     import math
 
     """
-    生成尽量接近 sqrt(N)×sqrt(N) 的规则网格图。
-    - 节点按从左上到右下（行优先）放置在 m×m 网格的前 N 个位置；
-    - 4-邻居（上/下/左/右）之间有 between factor（为避免重复，仅连向右、向下的边）；
-    - prior 仍按 prior_prop 概率采样 strong_ids，并与虚拟 'prior' 因子连边。
+    Generate a regular grid graph as close as possible to sqrt(N) × sqrt(N).
+    - Nodes are placed (row-major) at the first N cells of an m×m grid from top-left to bottom-right;
+    - Add between factors between 4-neighbors (up/down/left/right); to avoid duplicates, connect only rightward and downward edges;
+    - Priors: sample strong_ids according to prior_prop and connect them to a virtual 'prior' factor.
     """
     if rng is None:
         rng = np.random.default_rng()
 
-    # 网格尺寸：m×m，m = ceil(sqrt(N))
+    # Grid size: m×m, where m = ceil(sqrt(N))
     m = int(math.ceil(math.sqrt(int(N))))
 
     nodes, edges = [], []
 
-    # ---- 1) 生成节点（前 N 个格子，行优先）----
-    # 让左上为 (0,0)，向右 x+，向下 y+；每格间距为 grid_step
+    # ---- 1) Create nodes (first N cells, row-major) ----
+    # Top-left is (0, 0); x increases to the right, y increases downward; cell spacing = grid_step
     for idx in range(int(N)):
         r = idx // m     # row
         c = idx % m      # col
@@ -44,7 +44,7 @@ def make_slam_like_graph(N=100, grid_step=25, loop_prob=0.05, loop_radius=50, pr
             "position": {"x": x, "y": y}
         })
 
-    # ---- 2) 4-邻居连边（仅连向右、向下，避免重复）----
+    # ---- 2) 4-neighbor edges (connect only right and down to avoid duplicates) ----
     def in_bounds(id_):
         return 0 <= id_ < int(N)
 
@@ -52,19 +52,19 @@ def make_slam_like_graph(N=100, grid_step=25, loop_prob=0.05, loop_radius=50, pr
         r = idx // m
         c = idx % m
 
-        # 右邻居（同一行，列+1）
+        # Right neighbor (same row, col + 1)
         if c + 1 < m:
             right_id = idx + 1
             if in_bounds(right_id):
                 edges.append({"data": {"source": f"{idx}", "target": f"{right_id}"}})
 
-        # 下邻居（下一行，同一列）
+        # Down neighbor (next row, same column)
         if r + 1 < m:
             down_id = idx + m
             if in_bounds(down_id):
                 edges.append({"data": {"source": f"{idx}", "target": f"{down_id}"}})
 
-    # ---- 3) prior 采样逻辑（与原实现保持一致）----
+    # ---- 3) Prior sampling logic (identical to original implementation) ----
     if prior_prop <= 0.0:
         strong_ids = {0}
     elif prior_prop >= 1.0:
@@ -73,7 +73,7 @@ def make_slam_like_graph(N=100, grid_step=25, loop_prob=0.05, loop_radius=50, pr
         k = max(1, int(np.floor(prior_prop * int(N))))
         strong_ids = set(rng.choice(int(N), size=k, replace=False).tolist())
 
-    # prior 连边（虚拟因子 'prior'）
+    # Connect priors (virtual factor 'prior')
     for i in strong_ids:
         edges.append({"data": {"source": f"{i}", "target": "prior"}})
 
@@ -1573,7 +1573,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
         new_n["data"]["color_val"] = color_val
 
         # ==== Linear radius ====
-        size_linear = 8
+        size_linear = 4
 
         # ==== Log-scaled radius ====
         size_val = float(size_linear * (np.log(1 + nb*500/param_N) / np.log(4)))
@@ -1603,7 +1603,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
             "height": "data(size_val)",
             "background-color": f"mapData(color_val,1,{base_count},hsl(120,100%,40%),hsl(0,100%,50%))",
             "label": label_style,
-            "font-size": 10,
+            "font-size": 8,
             "text-valign": "top",
             "border-width": f"mapData(size_val,1,20,0.2,1.0)",   # size_val small → 0.2px, large → 1px
             "border-color": "rgba(0,0,0,0)"                   # soft gray border
@@ -1611,7 +1611,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
 
         {"selector": "edge", "style": {
             "line-color": "rgba(136,136,136,0.1)",  # #888 ≈ (136,136,136), alpha 0.1 ≈ 90% transparent
-            "width": 1
+            "width": 0.9
         }},
         {"selector": ".axis", "style": {
             "line-color": "black", "width": 1,
@@ -1796,4 +1796,4 @@ def unified_solver(gbp_click, gbp_ticks,
 
 # -----------------------
 if __name__=="__main__":
-    app.run(debug=True, port=8060)
+    app.run(debug=True, port=8050)
