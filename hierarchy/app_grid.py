@@ -1573,7 +1573,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
         new_n["data"]["color_val"] = color_val
 
         # ==== Linear radius ====
-        size_linear = 4
+        size_linear = 8
 
         # ==== Log-scaled radius ====
         size_val = float(size_linear * (np.log(1 + nb*500/param_N) / np.log(4)))
@@ -1603,7 +1603,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
             "height": "data(size_val)",
             "background-color": f"mapData(color_val,1,{base_count},hsl(120,100%,40%),hsl(0,100%,50%))",
             "label": label_style,
-            "font-size": 8,
+            "font-size": 10,
             "text-valign": "top",
             "border-width": f"mapData(size_val,1,20,0.2,1.0)",   # size_val small → 0.2px, large → 1px
             "border-color": "rgba(0,0,0,0)"                   # soft gray border
@@ -1611,7 +1611,7 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
 
         {"selector": "edge", "style": {
             "line-color": "rgba(136,136,136,0.1)",  # #888 ≈ (136,136,136), alpha 0.1 ≈ 90% transparent
-            "width": 0.9
+            "width": 1
         }},
         {"selector": ".axis", "style": {
             "line-color": "black", "width": 1,
@@ -1796,4 +1796,4 @@ def unified_solver(gbp_click, gbp_ticks,
 
 # -----------------------
 if __name__=="__main__":
-    app.run(debug=True, port=8050)
+    app.run(debug=True, port=8060)
