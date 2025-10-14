@@ -15,10 +15,10 @@ from utils.distances import bhattacharyya, mahalanobis
 class FactorGraph:
     def __init__(self,
                  nonlinear_factors=True,
-                 eta_damping=0.0,
-                 beta=None,
-                 num_undamped_iters=None,
-                 min_linear_iters=None,
+                 eta_damping=0.4,
+                 beta=0.0,
+                 num_undamped_iters=6,
+                 min_linear_iters=8,
                  wild_thresh=0):
 
         self.var_nodes = []
@@ -75,7 +75,7 @@ class FactorGraph:
     
     def energy_map(self, include_priors: bool = True, include_factors: bool = True) -> float:
         """
-        实际上是距离平方和
+        It is actually the sum of squares of distances.
         """
         total = 0.0
 
@@ -183,23 +183,42 @@ class FactorGraph:
         for count, factor in enumerate(factors):
             factor.compute_factor()
 
-    def relinearise_factors(self):
+    def relinearise_factors(self, factors=None):
         """
-            Compute the factor distribution for all factors for which the local belief mean has deviated a distance
-            greater than beta from the current linearisation point.
-            Relinearisation is only allowed at a maximum frequency of once every min_linear_iters iterations.
+        On a nonlinear graph, determine whether to relinearize based on the 
+        deviation between the mean of adjacent beliefs and the current linearized point.
+
+        If factors are passed, relinearize only for that subset; 
+        otherwise, relinearize for all self.factors.
         """
-        if self.nonlinear_factors:
-            for factor in self.factors:
-                adj_belief_means = np.array([])
-                for belief in factor.adj_beliefs:
-                    adj_belief_means = np.concatenate((adj_belief_means, 1/np.diagonal(belief.lam) * belief.eta))
-                if np.linalg.norm(factor.linpoint - adj_belief_means) > self.beta and factor.iters_since_relin >= self.min_linear_iters:
-                    factor.compute_factor(linpoint=adj_belief_means)
-                    factor.iters_since_relin = 0
-                    factor.eta_damping = 0.0
-                else:
-                    factor.iters_since_relin += 1
+        if not self.nonlinear_factors:
+            return
+
+        # 允许从 synchronous_iteration 传入子集
+        if factors is None:
+            factors = self.factors[:self.n_factor_nodes]
+
+        # 给 beta / min_linear_iters 容错默认
+        beta = self.beta if self.beta is not None else 0.0              # 0 表示每次都允许重线性化
+        min_linear_iters = self.min_linear_iters if self.min_linear_iters is not None else 10
+
+        for factor in factors:
+            # 拼接相邻 belief 的当前均值作为候选线性化点
+            adj_belief_means = []
+            for var in factor.adj_var_nodes:
+                adj_belief_means.append(var.mu)
+            adj_belief_means = np.concatenate(adj_belief_means) if adj_belief_means else np.array([])
+
+            # 是否满足重线性化条件
+            if (np.linalg.norm(factor.linpoint - adj_belief_means) > beta
+                and factor.iters_since_relin >= min_linear_iters):
+                # 用新的线性化点重建因子
+                factor.compute_factor(linpoint=adj_belief_means, update_self=True)
+                # 重线性化后的计数
+                factor.iters_since_relin = 0
+
+            else:
+                factor.iters_since_relin += 1
 
     def robustify_all_factors(self):
         for factor in self.factors[:self.n_factor_nodes]:
@@ -778,8 +797,8 @@ class Factor:
         """
         if linpoint is None:
             self.linpoint = []
-            for belief in self.adj_beliefs:
-                self.linpoint += list(1/np.diagonal(belief.lam) * belief.eta)
+            for var in self.adj_var_nodes:
+                self.linpoint += list(var.mu)
         else:
             self.linpoint = linpoint
 
@@ -842,8 +861,8 @@ class Factor:
 
     def relinearise(self, min_linear_iters, beta):
         adj_belief_means = np.array([])
-        for belief in self.adj_beliefs:
-            adj_belief_means = np.concatenate((adj_belief_means, 1/np.diagonal(belief.lam) * belief.eta))
+        for var in self.adj_var_nodes:
+            adj_belief_means = np.concatenate((adj_belief_means, var.mu))
         if np.linalg.norm(self.linpoint - adj_belief_means) > beta and self.iters_since_relin >= min_linear_iters:
             self.compute_factor(linpoint=adj_belief_means)
             self.iters_since_relin = 0

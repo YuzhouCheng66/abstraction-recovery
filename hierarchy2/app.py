@@ -14,43 +14,70 @@ app.title = "Factor Graph SVD Abs&Recovery"
 # -----------------------
 # SLAM-like base graph
 # -----------------------
-def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
-    if rng is None :
-        rng = np.random.default_rng()  # ✅ Ensure we have an RNG
+def make_slam_like_graph(
+    N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None
+):
+    if rng is None:
+        rng = np.random.default_rng()
 
-    nodes, edges = [], []
-    positions = []
-    x, y = 0.0, 0.0
-    positions.append((x, y))
+    # --- helpers ---
+    def wrap_angle(a):
+        # (-pi, pi]
+        return np.arctan2(np.sin(a), np.cos(a))
 
-    # ✅ Deterministic-by-RNG: trajectory generation
+    def relpose_SE2(pose_i, pose_j):
+        """ Return z_ij = [dx_local, dy_local, dtheta] where 'local' is frame of i """
+        xi, yi, thi = pose_i
+        xj, yj, thj = pose_j
+        Ri = np.array([[np.cos(thi), -np.sin(thi)],
+                       [np.sin(thi),  np.cos(thi)]])
+        dp = np.array([xj - xi, yj - yi])
+        trans_local = Ri.T @ dp
+        dth = wrap_angle(thj - thi)
+        return np.array([trans_local[0], trans_local[1], dth], dtype=float)
+
+    # --- SE(2) trajectory (smooth heading) ---
+    poses = []
+    x, y, th = 0.0, 0.0, 0.0
+    poses.append((x, y, th))
+
+    TURN_STD = 1  # rad, per step（可根据需要调小/调大）
     for _ in range(1, int(N)):
-        dx, dy = rng.standard_normal(2)  # replace np.random.randn
-        norm = np.sqrt(dx**2 + dy**2) + 1e-6
-        dx, dy = dx / norm * float(step_size), dy / norm * float(step_size)
-        x, y = x + dx, y + dy
-        positions.append((x, y))
+        dth = rng.normal(0.0, TURN_STD)
+        th = wrap_angle(th + dth)
+        x += float(step_size) * np.cos(th)
+        y += float(step_size) * np.sin(th)
+        poses.append((x, y, th))
 
-    # Sequential edges along the path
-    for i, (px, py) in enumerate(positions):
+    # --- nodes（dim:3），可视化仍用 x,y ---
+    nodes = []
+    for i, (px, py, pth) in enumerate(poses):
         nodes.append({
-            "data": {"id": f"{i}", "layer": 0, "dim": 2, "num_base": 1},
-            "position": {"x": float(px), "y": float(py)}
+            "data": {"id": f"{i}", "layer": 0, "dim": 3, "theta": float(pth), "num_base": 1},
+            "position": {"x": float(px), "y": float(py)}  # 仅用于画图
         })
 
+    # --- sequential odometry edges，附上测量 z_ij（局部系） ---
+    edges = []
     for i in range(int(N) - 1):
-        edges.append({"data": {"source": f"{i}", "target": f"{i+1}"}})
+        z_ij = relpose_SE2(poses[i], poses[i+1])
+        edges.append({
+            "data": {"source": f"{i}", "target": f"{i+1}", "kind": "odom", "z": z_ij.tolist()}
+        })
 
-    # ✅ Deterministic-by-RNG: loop-closure edges
+    # --- loop-closure edges（近邻触发），同样附上 SE(2) 测量 ---
     for i in range(int(N)):
-        for j in range(i + 5, int(N)):
-            if rng.random() < float(loop_prob):  # replace np.random.rand
-                xi, yi = positions[i]
-                xj, yj = positions[j]
+        xi, yi, _ = poses[i]
+        for j in range(i + 5, int(N)):  # 间隔>=5步再考虑回环
+            if rng.random() < float(loop_prob):
+                xj, yj, _ = poses[j]
                 if np.hypot(xi - xj, yi - yj) < float(loop_radius):
-                    edges.append({"data": {"source": f"{i}", "target": f"{j}"}})
+                    z_ij = relpose_SE2(poses[i], poses[j])
+                    edges.append({
+                        "data": {"source": f"{i}", "target": f"{j}", "kind": "loop", "z": z_ij.tolist()}
+                    })
 
-    # ✅ Sample priors using the same RNG
+    # --- strong priors（锚点等）；仍然连接到虚拟 "prior" ---
     if prior_prop <= 0.0:
         strong_ids = {0}
     elif prior_prop >= 1.0:
@@ -59,9 +86,8 @@ def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, pr
         k = max(1, int(np.floor(prior_prop * N)))
         strong_ids = set(rng.choice(N, size=k, replace=False).tolist())
 
-    # Add edges for nodes with strong priors
     for i in strong_ids:
-        edges.append({"data": {"source": f"{i}", "target": "prior"}})
+        edges.append({"data": {"source": f"{i}", "target": "prior", "kind": "prior"}})
 
     return nodes, edges
 
@@ -399,88 +425,152 @@ gbp_graph = None
 def build_noisy_pose_graph(
     nodes,
     edges,
-    prior_sigma: float = 10,
-    odom_sigma: float = 10,
+    prior_sigma: float | tuple | np.ndarray = 1.0,   # 标量更方便；内部会变成 [s, s, s*0.05]
+    odom_sigma:  float | tuple | np.ndarray = 1.0,   # 同上
     tiny_prior: float = 1e-10,
     rng=None,
 ):
-    
     """
-    Construct a 2D pose-only factor graph (linear, Gaussian) and inject noise.
-    Parameters:
-      prior_sigma : standard deviation of the strong prior (smaller = stronger)
-      odom_sigma  : standard deviation of odometry measurement noise
-      prior_prop  : 0.0 = anchor only; (0,1) = randomly select by proportion; >=1.0 = all
-      tiny_prior  : a tiny prior added to all nodes to prevent singularity
-      seed        : random seed (for reproducibility)
+    构建 SE(2) 2D pose graph（x, y, theta），二元边使用 SE(2) between 非线性测量模型。
+    - 节点 dofs = 3
+    - 支持 edges 中自带的 "z"（局部系测量）和 "kind"（'odom'/'loop'/...）
+    - prior_sigma / odom_sigma 可为标量或 3 维向量；标量时自动展开为 [s, s, s*THETA_RATIO]
     """
-
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
-
-    var_nodes = []
-    I2 = np.eye(2, dtype=float)
-    N = len(nodes)
-
-    # ---- Pre-generate noise ----
-    prior_noises = {}
-    odom_noises = {}
 
     if rng is None:
         rng = np.random.default_rng()
 
-    # Generate noise for all edges
-    for e in edges:
-        src = e["data"]["source"]; dst = e["data"]["target"]
-        # Binary edge
-        if dst != "prior":
-            odom_noises[(int(src[:]), int(dst[:]))] = rng.normal(0.0, odom_sigma, size=2)
-        # Unary edge (strong prior)
-        elif dst == "prior":
-            prior_noises[int(src[:])] = rng.normal(0.0, prior_sigma, size=2)
+    THETA_RATIO = 0.01  # 标量展开为 [s, s, s*0.01]
 
+    def _sigma_vec(s):
+        v = np.array(s, dtype=float).ravel()
+        if v.size == 1:
+            s = float(v.item())
+            return np.array([s, s, s * THETA_RATIO], dtype=float)
+        assert v.size == 3, "If sigma is not scalar, it must be length-3 (x,y,theta)."
+        return v
 
-    # ---- variable nodes ----
+    def wrap_angle(a):
+        return np.arctan2(np.sin(a), np.cos(a))
+
+    def relpose_SE2(pose_i, pose_j):
+        """z_ij = [dx_local, dy_local, dtheta]，在 i 的坐标系下定义。"""
+        xi, yi, thi = pose_i
+        xj, yj, thj = pose_j
+        c, s = np.cos(thi), np.sin(thi)
+        RT = np.array([[ c, s],
+                       [-s, c]])    # R(thi)^T
+        dp = np.array([xj - xi, yj - yi])
+        trans_local = RT @ dp
+        dth = wrap_angle(thj - thi)
+        return np.array([trans_local[0], trans_local[1], dth], dtype=float)
+
+    # ---------- 图 & 变量 ----------
+    fg = FactorGraph(nonlinear_factors=True, eta_damping=0)
+
+    var_nodes = []
+    I3 = np.eye(3, dtype=float)
     for i, n in enumerate(nodes):
-        v = VariableNode(i, dofs=2)
-        v.GT = np.array([n["position"]["x"], n["position"]["y"]], dtype=float)
+        v = VariableNode(i, dofs=3)
+        th = float(n["data"].get("theta", 0.0))  # 由 make_slam_like_graph 写入（弧度）
+        v.GT = np.array([n["position"]["x"], n["position"]["y"], th], dtype=float)
 
-        # Tiny prior
-        v.prior.lam = tiny_prior * I2
-        v.prior.eta = np.zeros(2, dtype=float)
+        # tiny prior 防止奇异
+        v.prior.lam = tiny_prior * I3
+        v.prior.eta = np.zeros(3, dtype=float)
 
         var_nodes.append(v)
 
     fg.var_nodes = var_nodes
     fg.n_var_nodes = len(var_nodes)
 
+    # ---------- 测量模型（SE(2) between） ----------
+    def meas_fn_se2_between(xij, *args):
+        # xij = [xi, yi, thi, xj, yj, thj]
+        xi, yi, thi, xj, yj, thj = xij
+        c, s = np.cos(thi), np.sin(thi)
+        RT = np.array([[ c, s],
+                       [-s, c]])
+        dp = np.array([xj - xi, yj - yi])
+        r  = RT @ dp
+        dth = wrap_angle(thj - thi)
+        return np.array([r[0], r[1], dth], dtype=float)
+    
+    def jac_fn_se2_between(xij, *args):
+        # J: 3x6 w.r.t [xi,yi,thi,xj,yj,thj]
+        xi, yi, thi, xj, yj, thj = xij
+        c, s = np.cos(thi), np.sin(thi)
+        RT = np.array([[ c, s],
+                    [-s, c]])
+        dp = np.array([xj - xi, yj - yi])
+        r  = RT @ dp                    # [rx, ry]
+        dr_dthi = np.array([ r[1], -r[0] ])   # ← 修正后的 ∂r/∂θi
 
-    # ---- prior factors ----
+        J = np.zeros((3, 6), dtype=float)
+        # wrt i
+        J[0:2, 0:2] = -RT
+        J[0:2, 2]   = dr_dthi
+        # wrt j
+        J[0:2, 3:5] = RT
+        # angle row
+        J[2, 2] = -1.0
+        J[2, 5] =  1.0
+        return J
+
+
     def meas_fn_unary(x, *args):
         return x
+
     def jac_fn_unary(x, *args):
-        return np.eye(2)
-    # ---- odometry factors ----
-    def meas_fn(xy, *args):
-        return xy[2:] - xy[:2]
-    def jac_fn(xy, *args):
-        return np.array([[-1, 0, 1, 0],
-                         [ 0,-1, 0, 1]], dtype=float)
-    
+        return np.eye(3, dtype=float)
+
+    # ---------- 信息矩阵 ----------
+    prior_sigma_vec = _sigma_vec(prior_sigma)
+    odom_sigma_vec  = _sigma_vec(odom_sigma)
+
+    Lambda_prior = np.diag(1.0 / (prior_sigma_vec**2))
+    Lambda_odom  = np.diag(1.0 / (odom_sigma_vec**2))
+
+    # ---------- 因子 ----------
     factors = []
     fid = 0
 
+    # 强锚点：固定全局参考（可仅锚 x,y，把 Lambda_anchor[2,2] 放松）
+    v0 = var_nodes[0]
+    z_anchor = v0.GT.copy()
+    Lambda_anchor = np.diag(1.0 / (np.array([1e-3, 1e-3, 1e-4])**2))
+    f0 = Factor(fid, [v0], z_anchor, Lambda_anchor, meas_fn_unary, jac_fn_unary)
+    f0.type = "prior"
+    f0.compute_factor(linpoint=z_anchor, update_self=True)
+    factors.append(f0)
+    v0.adj_factors.append(f0)
+    fid += 1
+
+    # 其余边
     for e in edges:
-        src = e["data"]["source"]; dst = e["data"]["target"]
+        src = e["data"]["source"]
+        dst = e["data"]["target"]
+
+        # 二元边：SE(2) between
         if dst != "prior":
-            i, j = int(src[:]), int(dst[:])
+            i, j = int(src), int(dst)
             vi, vj = var_nodes[i], var_nodes[j]
 
-            meas = (vj.GT - vi.GT) + odom_noises[(i, j)]
+            # 若边里已有 z（局部测量），直接用；否则用 GT 生成
+            if "z" in e["data"]:
+                z = np.array(e["data"]["z"], dtype=float).ravel()
+            else:
+                z = relpose_SE2(vi.GT, vj.GT)
 
-            meas_lambda = np.eye(len(meas))/ (odom_sigma**2)
-            f = Factor(fid, [vi, vj], meas, meas_lambda, meas_fn, jac_fn)
-            f.type = "base"
-            linpoint = np.r_[vi.GT, vj.GT]
+            # 给测量加噪（这里统一用 odom_sigma；若想区分回环，可按 kind 分支）
+            noise = rng.normal(0.0, odom_sigma_vec, size=3)
+            z_noisy = z.copy()
+            z_noisy[:2] += noise[:2]
+            z_noisy[2]   = wrap_angle(z_noisy[2] + noise[2])
+
+            f = Factor(fid, [vi, vj], z_noisy, Lambda_odom, meas_fn_se2_between, jac_fn_se2_between)
+            f.type = e["data"].get("kind", "between")
+            linpoint = np.r_[vi.mu, vj.mu]  # 线性化点
             f.compute_factor(linpoint=linpoint, update_self=True)
 
             factors.append(f)
@@ -488,32 +578,23 @@ def build_noisy_pose_graph(
             vj.adj_factors.append(f)
             fid += 1
 
+        # 一元边：额外强先验（来自图中 'prior' 边）
         else:
-            i = int(src[:])
+            i = int(src)
             vi = var_nodes[i]
-            z = vi.GT + prior_noises[i]
 
-            z_lambda = np.eye(len(meas))/ (prior_sigma**2)
-            f = Factor(fid, [vi], z, z_lambda, meas_fn_unary, jac_fn_unary)
+            z = vi.GT.copy()
+            noise = rng.normal(0.0, prior_sigma_vec, size=3)
+            z[:2] += noise[:2]
+            z[2]   = wrap_angle(z[2] + noise[2])
+
+            f = Factor(fid, [vi], z, Lambda_prior, meas_fn_unary, jac_fn_unary)
             f.type = "prior"
-            f.compute_factor(linpoint=z, update_self=True)
+            f.compute_factor(linpoint=vi.mu, update_self=True)
 
             factors.append(f)
             vi.adj_factors.append(f)
             fid += 1
-
-        # anchor for initial position
-        v0 = var_nodes[0]
-        z = v0.GT
-
-        z_lambda = np.eye(len(meas))/ ((1e-3)**2)
-        f = Factor(fid, [v0], z, z_lambda, meas_fn_unary, jac_fn_unary)
-        f.type = "prior"
-        f.compute_factor(linpoint=z, update_self=True)
-
-        factors.append(f)
-        v0.adj_factors.append(f)
-        fid += 1
 
     fg.factors = factors
     fg.n_factor_nodes = len(factors)
@@ -1114,7 +1195,8 @@ def refresh_gbp_results(layers):
             L["A"], L["b"] = {}, {}
             for v in g.var_nodes:
                 key = str(v.variableID)
-                L["A"][key] = np.eye(2)
+                L["A"][key] = np.array([[1.0, 0.0, 0.0],
+                                        [0.0, 1.0, 0.0]], dtype=float)  # 2x3: 只取 x,y
                 L["b"][key] = np.zeros(2, dtype=float)
 
         # ---- super ----
@@ -1196,7 +1278,6 @@ def refresh_gbp_results(layers):
                 res[a_id] = (A @ v.mu + b).tolist()
 
         L["gbp_result"] = res
-
 
 
 
