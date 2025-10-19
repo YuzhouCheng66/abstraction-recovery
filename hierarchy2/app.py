@@ -41,7 +41,7 @@ def make_slam_like_graph(
     x, y, th = 0.0, 0.0, 0.0
     poses.append((x, y, th))
 
-    TURN_STD = 1  # rad, per step（可根据需要调小/调大）
+    TURN_STD = 1  # rad, per step (tune smaller/larger as needed)
     for _ in range(1, int(N)):
         dth = rng.normal(0.0, TURN_STD)
         th = wrap_angle(th + dth)
@@ -49,15 +49,15 @@ def make_slam_like_graph(
         y += float(step_size) * np.sin(th)
         poses.append((x, y, th))
 
-    # --- nodes（dim:3），可视化仍用 x,y ---
+    # --- nodes (dim:3); visualization uses x,y ---
     nodes = []
     for i, (px, py, pth) in enumerate(poses):
         nodes.append({
             "data": {"id": f"{i}", "layer": 0, "dim": 3, "theta": float(pth), "num_base": 1},
-            "position": {"x": float(px), "y": float(py)}  # 仅用于画图
+            "position": {"x": float(px), "y": float(py)}  # for plotting only
         })
 
-    # --- sequential odometry edges，附上测量 z_ij（局部系） ---
+    # --- sequential odometry edges; attach measurement z_ij (local frame) ---
     edges = []
     for i in range(int(N) - 1):
         z_ij = relpose_SE2(poses[i], poses[i+1])
@@ -65,10 +65,10 @@ def make_slam_like_graph(
             "data": {"source": f"{i}", "target": f"{i+1}", "kind": "odom", "z": z_ij.tolist()}
         })
 
-    # --- loop-closure edges（近邻触发），同样附上 SE(2) 测量 ---
+    # --- loop-closure edges (proximity-triggered); also attach SE(2) measurements ---
     for i in range(int(N)):
         xi, yi, _ = poses[i]
-        for j in range(i + 5, int(N)):  # 间隔>=5步再考虑回环
+        for j in range(i + 5, int(N)):  # consider loop closures only when gap >= 5 steps
             if rng.random() < float(loop_prob):
                 xj, yj, _ = poses[j]
                 if np.hypot(xi - xj, yi - yj) < float(loop_radius):
@@ -77,7 +77,7 @@ def make_slam_like_graph(
                         "data": {"source": f"{i}", "target": f"{j}", "kind": "loop", "z": z_ij.tolist()}
                     })
 
-    # --- strong priors（锚点等）；仍然连接到虚拟 "prior" ---
+    # --- strong priors (anchors, etc.); still connect to the virtual "prior" ---
     if prior_prop <= 0.0:
         strong_ids = {0}
     elif prior_prop >= 1.0:
@@ -90,7 +90,6 @@ def make_slam_like_graph(
         edges.append({"data": {"source": f"{i}", "target": "prior", "kind": "prior"}})
 
     return nodes, edges
-
 
 
 # -----------------------
@@ -425,22 +424,20 @@ gbp_graph = None
 def build_noisy_pose_graph(
     nodes,
     edges,
-    prior_sigma: float | tuple | np.ndarray = 1.0,   # 标量更方便；内部会变成 [s, s, s*0.05]
-    odom_sigma:  float | tuple | np.ndarray = 1.0,   # 同上
+    prior_sigma: float | tuple | np.ndarray = 1.0,   # A scalar expands to [s, s, s*THETA_RATIO]
+    odom_sigma:  float | tuple | np.ndarray = 1.0,   # Same as above
     tiny_prior: float = 1e-10,
     rng=None,
 ):
     """
-    构建 SE(2) 2D pose graph（x, y, theta），二元边使用 SE(2) between 非线性测量模型。
-    - 节点 dofs = 3
-    - 支持 edges 中自带的 "z"（局部系测量）和 "kind"（'odom'/'loop'/...）
-    - prior_sigma / odom_sigma 可为标量或 3 维向量；标量时自动展开为 [s, s, s*THETA_RATIO]
+    Build an SE(2) 2D pose graph (x, y, theta). Binary edges use the SE(2) between nonlinear measurement model.
+    Initialization policy: first propagate mu sequentially (reset when encountering a prior), then linearize all factors.
     """
 
     if rng is None:
         rng = np.random.default_rng()
 
-    THETA_RATIO = 0.01  # 标量展开为 [s, s, s*0.01]
+    THETA_RATIO = 0.01  # A scalar expands to [s, s, s*0.01]
 
     def _sigma_vec(s):
         v = np.array(s, dtype=float).ravel()
@@ -454,7 +451,7 @@ def build_noisy_pose_graph(
         return np.arctan2(np.sin(a), np.cos(a))
 
     def relpose_SE2(pose_i, pose_j):
-        """z_ij = [dx_local, dy_local, dtheta]，在 i 的坐标系下定义。"""
+        """z_ij = [dx_local, dy_local, dtheta], defined in i's coordinate frame."""
         xi, yi, thi = pose_i
         xj, yj, thj = pose_j
         c, s = np.cos(thi), np.sin(thi)
@@ -465,26 +462,33 @@ def build_noisy_pose_graph(
         dth = wrap_angle(thj - thi)
         return np.array([trans_local[0], trans_local[1], dth], dtype=float)
 
-    # ---------- 图 & 变量 ----------
+    def compose_SE2(pose_i, z_ij):
+        """Given local measurement z_ij, propagate from pose_i to pose_j."""
+        xi, yi, thi = pose_i
+        dx, dy, dth = z_ij
+        c, s = np.cos(thi), np.sin(thi)
+        t_global = np.array([c*dx - s*dy, s*dx + c*dy])
+        xj = xi + t_global[0]
+        yj = yi + t_global[1]
+        thj = wrap_angle(thi + dth)
+        return np.array([xj, yj, thj], dtype=float)
+
+    # ---------- Graph & variables ----------
     fg = FactorGraph(nonlinear_factors=True, eta_damping=0)
 
     var_nodes = []
-    I3 = np.eye(3, dtype=float)
     for i, n in enumerate(nodes):
         v = VariableNode(i, dofs=3)
-        th = float(n["data"].get("theta", 0.0))  # 由 make_slam_like_graph 写入（弧度）
+        th = float(n["data"].get("theta", 0.0))  # Written by make_slam_like_graph (radians)
         v.GT = np.array([n["position"]["x"], n["position"]["y"], th], dtype=float)
-
-        # tiny prior 防止奇异
-        v.prior.lam = tiny_prior * I3
-        v.prior.eta = np.zeros(3, dtype=float)
-
+        # Initialize mu to zero; will be set by sequential measurements later
+        v.mu = np.zeros(3, dtype=float)
         var_nodes.append(v)
 
     fg.var_nodes = var_nodes
     fg.n_var_nodes = len(var_nodes)
 
-    # ---------- 测量模型（SE(2) between） ----------
+    # ---------- Measurement model (SE(2) between) ----------
     def meas_fn_se2_between(xij, *args):
         # xij = [xi, yi, thi, xj, yj, thj]
         xi, yi, thi, xj, yj, thj = xij
@@ -504,7 +508,7 @@ def build_noisy_pose_graph(
                     [-s, c]])
         dp = np.array([xj - xi, yj - yi])
         r  = RT @ dp                    # [rx, ry]
-        dr_dthi = np.array([ r[1], -r[0] ])   # ← 修正后的 ∂r/∂θi
+        dr_dthi = np.array([ r[1], -r[0] ])   # ← corrected ∂r/∂θi
 
         J = np.zeros((3, 6), dtype=float)
         # wrt i
@@ -517,25 +521,26 @@ def build_noisy_pose_graph(
         J[2, 5] =  1.0
         return J
 
-
     def meas_fn_unary(x, *args):
         return x
 
     def jac_fn_unary(x, *args):
         return np.eye(3, dtype=float)
 
-    # ---------- 信息矩阵 ----------
+    # ---------- Information matrices ----------
     prior_sigma_vec = _sigma_vec(prior_sigma)
     odom_sigma_vec  = _sigma_vec(odom_sigma)
 
     Lambda_prior = np.diag(1.0 / (prior_sigma_vec**2))
     Lambda_odom  = np.diag(1.0 / (odom_sigma_vec**2))
 
-    # ---------- 因子 ----------
+    # ---------- Factors; first create noisy measurements (no linearization yet) ----------
+    odom_meas = {}   # (i,j) -> z_noisy
+    prior_meas = {}  # i -> z_noisy (unary)
     factors = []
     fid = 0
 
-    # 强锚点：固定全局参考（可仅锚 x,y，把 Lambda_anchor[2,2] 放松）
+    # Strong anchor: fix global reference (optionally anchor only x,y by relaxing Lambda_anchor[2,2])
     v0 = var_nodes[0]
     z_anchor = v0.GT.copy()
     Lambda_anchor = np.diag(1.0 / (np.array([1e-3, 1e-3, 1e-4])**2))
@@ -546,55 +551,79 @@ def build_noisy_pose_graph(
     v0.adj_factors.append(f0)
     fid += 1
 
-    # 其余边
     for e in edges:
         src = e["data"]["source"]
         dst = e["data"]["target"]
 
-        # 二元边：SE(2) between
         if dst != "prior":
             i, j = int(src), int(dst)
-            vi, vj = var_nodes[i], var_nodes[j]
 
-            # 若边里已有 z（局部测量），直接用；否则用 GT 生成
+            # Raw z (use existing if provided; otherwise derive from GT)
             if "z" in e["data"]:
                 z = np.array(e["data"]["z"], dtype=float).ravel()
             else:
-                z = relpose_SE2(vi.GT, vj.GT)
+                z = relpose_SE2(var_nodes[i].GT, var_nodes[j].GT)
 
-            # 给测量加噪（这里统一用 odom_sigma；若想区分回环，可按 kind 分支）
+            # Add noise
             noise = rng.normal(0.0, odom_sigma_vec, size=3)
             z_noisy = z.copy()
             z_noisy[:2] += noise[:2]
-            z_noisy[2]   = wrap_angle(z_noisy[2] + noise[2])
+            z_noisy[2]  = wrap_angle(z_noisy[2] + noise[2])
 
+            odom_meas[(i, j)] = z_noisy
+
+            # Create factor, but do not compute_factor yet
+            vi, vj = var_nodes[i], var_nodes[j]
             f = Factor(fid, [vi, vj], z_noisy, Lambda_odom, meas_fn_se2_between, jac_fn_se2_between)
             f.type = e["data"].get("kind", "between")
-            linpoint = np.r_[vi.mu, vj.mu]  # 线性化点
-            f.compute_factor(linpoint=linpoint, update_self=True)
-
             factors.append(f)
             vi.adj_factors.append(f)
             vj.adj_factors.append(f)
             fid += 1
 
-        # 一元边：额外强先验（来自图中 'prior' 边）
         else:
+            # Prior edge: create a noisy measurement for this variable
             i = int(src)
-            vi = var_nodes[i]
-
-            z = vi.GT.copy()
+            z = var_nodes[i].GT.copy()
             noise = rng.normal(0.0, prior_sigma_vec, size=3)
             z[:2] += noise[:2]
             z[2]   = wrap_angle(z[2] + noise[2])
+            prior_meas[i] = z
 
+            vi = var_nodes[i]
             f = Factor(fid, [vi], z, Lambda_prior, meas_fn_unary, jac_fn_unary)
             f.type = "prior"
-            f.compute_factor(linpoint=vi.mu, update_self=True)
-
             factors.append(f)
             vi.adj_factors.append(f)
             fid += 1
+
+    # ---------- Sequentially initialize mu: forward propagation from node 0; reset when hitting a prior ----------
+    N = len(var_nodes)
+    # Start: use GT
+    var_nodes[0].mu = var_nodes[0].GT
+
+    for i in range(N - 1):
+        # First propagate via odometry
+        if (i, i+1) in odom_meas:
+            var_nodes[i+1].mu = compose_SE2(var_nodes[i].mu, odom_meas[(i, i+1)])
+        else:
+            # If the edge is missing, fall back to GT
+            var_nodes[i+1].mu = var_nodes[i+1].GT.copy()
+
+        # If i+1 has a prior, override with the prior (replace the propagated value)
+        if (i + 1) in prior_meas:
+            var_nodes[i+1].mu = prior_meas[i + 1].copy()
+
+    # ---------- Add a very weak prior to each variable to avoid singularities ----------
+    Lam_weak = tiny_prior * np.diag([1.0, 1.0, 100.0])  # Make the angle dimension slightly “stiffer” to prevent drift
+    for v in var_nodes:
+        v.prior.lam = Lam_weak
+        v.prior.eta = Lam_weak @ v.mu  # Use the initialized mu as the mean of the weak prior
+
+    # ---------- Linearize all factors (mu is now in place) ----------
+    for f in factors:
+        lin = np.concatenate([vn.mu for vn in f.adj_var_nodes]) if f.adj_var_nodes else np.array([])
+        f.compute_factor(linpoint=lin, update_self=True)
 
     fg.factors = factors
     fg.n_factor_nodes = len(factors)
