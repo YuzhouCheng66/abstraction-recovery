@@ -566,50 +566,35 @@ def build_super_graph(layers):
 
         v = VariableNode(i, dofs=dofs)
 
-        # === Preallocate ===
-        local       = local_idx.get(sid, {})  # {bid: (st, d)}
-        gt_vec      = np.zeros(dofs, dtype=float)
-        prior_lam   = np.zeros((dofs, dofs), dtype=float)
-        prior_eta   = np.zeros(dofs, dtype=float)
-        mu_super    = np.zeros(dofs, dtype=float)
-        Sigma_super = np.zeros((dofs, dofs), dtype=float)
-
-        # === Single pass fill: GT, prior, mu, Sigma ===
-        for bid in local:
-            st, d = local[bid]
-            vb = id2var[bid]
-
-            # GT
-            gt_base = getattr(vb, "GT", None)
-            if gt_base is not None and len(gt_base) == d:
-                gt_vec[st:st+d] = gt_base  
-
-            # prior
-            prior_lam[st:st+d, st:st+d] = vb.prior.lam
-            prior_eta[st:st+d]          = vb.prior.eta
-
-            # belief
-            mu_super[st:st+d]                 = vb.mu
-            Sigma_super[st:st+d, st:st+d]     = vb.Sigma
-
-        # write back
+        # === Stack base GT ===
+        gt_vec = np.zeros(dofs)
+        for bid, (st, d) in local_idx[sid].items():
+            gt_base = getattr(id2var[bid], "GT", None)
+            if gt_base is None or len(gt_base) != d:
+                gt_base = np.zeros(d)
+            gt_vec[st:st+d] = gt_base
         v.GT = gt_vec
-        v.prior.lam = prior_lam
-        v.prior.eta = prior_eta
-
-        # belief & natural params
-        if dofs > 0:
-            lam = np.linalg.inv(Sigma_super)
-            eta = lam @ mu_super
-        else:
-            lam = np.zeros((0, 0)); eta = np.zeros(0, dtype=float)
-
-        v.mu = mu_super
-        v.Sigma = Sigma_super
-        v.belief = NdimGaussian(dofs, eta, lam)
+        v.prior.lam = 1e-10 * np.eye(dofs, dtype=float)
+        v.prior.eta = np.zeros(dofs, dtype=float)
 
         super_var_nodes[sid] = v
         fg.var_nodes.append(v)
+
+        # === Stack base belief ===
+        mu_blocks = []
+        Sigma_blocks = []
+        for bid, (st, d) in local_idx[sid].items():
+            vb = id2var[bid]
+            mu_blocks.append(vb.mu)
+            Sigma_blocks.append(vb.Sigma)
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
+        Sigma_super = scipy.linalg.block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
+
+        lam = np.linalg.inv(Sigma_super)
+        eta = lam @ mu_super
+        v.mu = mu_super
+        v.Sigma = Sigma_super
+        v.belief = NdimGaussian(dofs, eta, lam)
 
 
     fg.n_var_nodes = len(fg.var_nodes)
