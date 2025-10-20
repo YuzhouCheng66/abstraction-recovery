@@ -941,8 +941,8 @@ def build_abs_graph(
 
         v = VariableNode(sid, dofs=r)
         v.GT = sn.GT
-        v.prior.lam = 1e-8 * B_reduced.T @ sn.belief.lam @ B_reduced
-        v.prior.eta = 1e-8 * B_reduced.T @ sn.belief.eta
+        v.prior.lam = 1e-10 * B_reduced.T @ sn.belief.lam @ B_reduced
+        v.prior.eta = 1e-10 * B_reduced.T @ sn.belief.eta
         v.mu = varis_abs_mu
         v.Sigma = varis_abs_sigma
         v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)

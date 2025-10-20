@@ -271,10 +271,10 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
     # Group sizes
     base = n // k
     rem  = n %  k
-    if tail_heavy:
-        sizes = [base]*(k-1) + [base+rem]     # Tail absorbs remainder: ..., last += rem
+    if rem > 0:
+        sizes = [k]*(base) + [rem]     # Tail absorbs remainder: ..., last += rem
     else:
-        sizes = [base+1]*rem + [base]*(k-rem) # Evenly distribute remainder (optional)
+        sizes = [k]*(base)
 
     # Build groups: record indices per group
     groups = []
@@ -574,9 +574,6 @@ def build_super_graph(layers):
                 gt_base = np.zeros(d)
             gt_vec[st:st+d] = gt_base
         v.GT = gt_vec
-        v.prior.lam = 1e-10 * np.eye(dofs, dtype=float)
-        v.prior.eta = np.zeros(dofs, dtype=float)
-
         super_var_nodes[sid] = v
         fg.var_nodes.append(v)
 
@@ -588,14 +585,15 @@ def build_super_graph(layers):
             mu_blocks.append(vb.mu)
             Sigma_blocks.append(vb.Sigma)
         mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
-        Sigma_super = scipy.linalg.block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
+        Sigma_super = block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
 
         lam = np.linalg.inv(Sigma_super)
         eta = lam @ mu_super
         v.mu = mu_super
         v.Sigma = Sigma_super
         v.belief = NdimGaussian(dofs, eta, lam)
-
+        v.prior.lam = 1e-10 * lam
+        v.prior.eta = 1e-10 * eta
 
     fg.n_var_nodes = len(fg.var_nodes)
 
@@ -765,7 +763,6 @@ def build_super_graph(layers):
 
 
     fg.n_factor_nodes = len(fg.factors)
-    print(1)
     return fg
 
 
@@ -778,14 +775,13 @@ def build_abs_graph(
     Bs = {}
     ks = {}
     k2s = {}
-    r = 2
 
     # === 1. Build Abstraction Variables ===
     abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
     sup_fg = layers[-2]["graph"]
 
     for sn in sup_fg.var_nodes:
-        if sn.dofs <= r:
+        if sn.dofs <= r_reduced:
             r = sn.dofs  # No reduction if dofs already <= r
         else:
             r = r_reduced
@@ -817,8 +813,8 @@ def build_abs_graph(
 
         v = VariableNode(sid, dofs=r)
         v.GT = sn.GT
-        v.prior.lam = 1e-10 * np.eye(r, dtype=float)
-        v.prior.eta = np.zeros(r, dtype=float)
+        v.prior.lam = 1e-10 * varis_abs_lam
+        v.prior.eta = 1e-10 * varis_abs_eta
         v.mu = varis_abs_mu
         v.Sigma = varis_abs_sigma
         v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
@@ -1010,8 +1006,7 @@ def top_down_modify_base_and_abs_graph(layers):
             eta = v.belief.lam @ v.mu
             new_belief = NdimGaussian(v.dofs, eta, v.belief.lam)
             v.belief = new_belief
-            v.prior = NdimGaussian(v.dofs, 0.0000001*v.mu, 0.0000001*np.eye(v.dofs))
-
+            v.prior = NdimGaussian(v.dofs, 1e-10*eta, 1e-10*v.belief.lam)
 
             # 3. Sync to adjacent factors (this step is important)
             if v.adj_factors:
@@ -1026,8 +1021,8 @@ def top_down_modify_base_and_abs_graph(layers):
                         f.adj_beliefs[idx] = new_belief
                         # correct coresponding message
                         msg = f.messages[idx]
-                        msg.eta += 0.1*d_eta / n_adj
-                        msg.lam += 0.1*d_lam / n_adj
+                        msg.eta += d_eta / n_adj
+                        msg.lam += d_lam / n_adj
                         f.messages[idx] = msg
 
     return base_graph
@@ -1072,7 +1067,7 @@ def top_down_modify_super_graph(layers):
         eta = sn.belief.lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, sn.belief.lam)
         sn.belief  = new_belief
-        #sn.prior = NdimGaussian(sn.dofs, 0.01*sn.mu, 0.01*np.eye(sn.dofs))
+        sn.prior = NdimGaussian(sn.dofs, 1e-10*eta, 1e-10*sn.belief.lam)
 
     # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
     # Idea: for the side of the super factor f_sup connected to variable sid:
@@ -1200,7 +1195,6 @@ def refresh_gbp_results(layers):
 
 
 
-
 def vloop(layers):
     """
     Simplified V-cycle:
@@ -1214,15 +1208,14 @@ def vloop(layers):
         layers[0]["graph"].synchronous_iteration()
         
     for i in range(1, len(layers)):
-        # After build, one iteration per layer
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
-
         name = layers[i]["name"]
+
         if name.startswith("super1"):
             # Update super using the previous layer's graph
             # layers[i]["graph"] = build_super_graph(layers[:i+1])
+            #layers[i]["graph"].synchronous_iteration()
             bottom_up_modify_super_graph(layers[:i+1])
+            #build_super_graph(layers[:i+1])
 
         elif name.startswith("super"):
             # Update super using the previous layer's graph
@@ -1234,6 +1227,9 @@ def vloop(layers):
             layers[i]["graph"] = abs_graph
             layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
+        # After build, one iteration per layer
+        if "graph" in layers[i]:
+            layers[i]["graph"].synchronous_iteration()
 
     # ---- top-down (pass mu) ----
     for i in range(len(layers) - 1, 0, -1):
@@ -1249,6 +1245,7 @@ def vloop(layers):
         if name.startswith("super"):
             # Split super.mu back to base/abs
             top_down_modify_base_and_abs_graph(layers[:i+1])
+
         elif name.startswith("abs"):
             # Project abs.mu back to super
             top_down_modify_super_graph(layers[:i+1])
@@ -1275,7 +1272,7 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("loop prob:", style={"marginRight":"6px"}),
-            dcc.Input(id="param-prob", type="number", value=0.05, min=0, max=1, step=0.01,
+            dcc.Input(id="param-prob", type="number", value=0.05, min=0, max=1, step=0.001,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("loop radius:", style={"marginRight":"6px"}),
@@ -1283,7 +1280,7 @@ app.layout = html.Div([
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("prior prop:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-prop", type="number", value=0.02, step=0.01, min=0, max=1,
+            dcc.Input(id="prior-prop", type="number", value=0.02, step=0.001, min=0, max=1,
                       style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("show number:", style={"marginRight":"6px"}),
@@ -1322,7 +1319,7 @@ app.layout = html.Div([
             dcc.Input(id="grid-gy", type="number", value=2, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("K:", style={"marginRight":"6px"}),
-            dcc.Input(id="kmeans-k", type="number", value=128, min=1, step=1,
+            dcc.Input(id="kmeans-k", type="number", value=5, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("seed:", style={"marginRight":"6px"}),
             dcc.Input(id="rand-seed", type="number", value=2001, step=1,
