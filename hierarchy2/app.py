@@ -676,35 +676,50 @@ def build_super_graph(layers):
 
         v = VariableNode(i, dofs=dofs)
 
-        # === Stack base GT ===
-        gt_vec = np.zeros(dofs)
-        for bid, (st, d) in local_idx[sid].items():
-            gt_base = getattr(id2var[bid], "GT", None)
-            if gt_base is None or len(gt_base) != d:
-                gt_base = np.zeros(d)
-            gt_vec[st:st+d] = gt_base
-        v.GT = gt_vec
-        v.prior.lam = 1e-10 * np.eye(dofs, dtype=float)
-        v.prior.eta = np.zeros(dofs, dtype=float)
+        # === Preallocate ===
+        local       = local_idx.get(sid, {})  # {bid: (st, d)}
+        gt_vec      = np.zeros(dofs, dtype=float)
+        prior_lam   = np.zeros((dofs, dofs), dtype=float)
+        prior_eta   = np.zeros(dofs, dtype=float)
+        mu_super    = np.zeros(dofs, dtype=float)
+        Sigma_super = np.zeros((dofs, dofs), dtype=float)
 
-        super_var_nodes[sid] = v
-        fg.var_nodes.append(v)
-
-        # === Stack base belief ===
-        mu_blocks = []
-        Sigma_blocks = []
-        for bid, (st, d) in local_idx[sid].items():
+        # === Single pass fill: GT, prior, mu, Sigma ===
+        for bid in local:
+            st, d = local[bid]
             vb = id2var[bid]
-            mu_blocks.append(vb.mu)
-            Sigma_blocks.append(vb.Sigma)
-        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
-        Sigma_super = scipy.linalg.block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
 
-        lam = np.linalg.inv(Sigma_super)
-        eta = lam @ mu_super
+            # GT
+            gt_base = getattr(vb, "GT", None)
+            if gt_base is not None and len(gt_base) == d:
+                gt_vec[st:st+d] = gt_base  # otherwise 0
+
+            # prior（concatenate）
+            prior_lam[st:st+d, st:st+d] = vb.prior.lam
+            prior_eta[st:st+d]          = vb.prior.eta
+
+            # belief
+            mu_super[st:st+d]                 = vb.mu
+            Sigma_super[st:st+d, st:st+d]     = vb.Sigma
+
+        # write back
+        v.GT = gt_vec
+        v.prior.lam = prior_lam
+        v.prior.eta = prior_eta
+
+        # belief & natural params
+        if dofs > 0:
+            lam = np.linalg.inv(Sigma_super)
+            eta = lam @ mu_super
+        else:
+            lam = np.zeros((0, 0)); eta = np.zeros(0, dtype=float)
+
         v.mu = mu_super
         v.Sigma = Sigma_super
         v.belief = NdimGaussian(dofs, eta, lam)
+
+        super_var_nodes[sid] = v
+        fg.var_nodes.append(v)
 
 
     fg.n_var_nodes = len(fg.var_nodes)
@@ -881,13 +896,13 @@ def build_super_graph(layers):
 
 def build_abs_graph(
     layers,
-    r_reduced = 2):
+    r_reduced = 3):
 
     abs_var_nodes = {}
     Bs = {}
     ks = {}
     k2s = {}
-    r = 2
+    r = 3
 
     # === 1. Build Abstraction Variables ===
     abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
@@ -926,8 +941,8 @@ def build_abs_graph(
 
         v = VariableNode(sid, dofs=r)
         v.GT = sn.GT
-        v.prior.lam = 1e-10 * np.eye(r, dtype=float)
-        v.prior.eta = np.zeros(r, dtype=float)
+        v.prior.lam = 1e-8 * B_reduced.T @ sn.belief.lam @ B_reduced
+        v.prior.eta = 1e-8 * B_reduced.T @ sn.belief.eta
         v.mu = varis_abs_mu
         v.Sigma = varis_abs_sigma
         v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
@@ -1119,7 +1134,7 @@ def top_down_modify_base_and_abs_graph(layers):
             eta = v.belief.lam @ v.mu
             new_belief = NdimGaussian(v.dofs, eta, v.belief.lam)
             v.belief = new_belief
-            v.prior = NdimGaussian(v.dofs, 0.1*v.mu, 0.1*np.eye(v.dofs))
+            v.prior = NdimGaussian(v.dofs, 1e-10*eta, 1e-10*v.belief.lam)
 
 
             # 3. Sync to adjacent factors (this step is important)
@@ -1181,7 +1196,7 @@ def top_down_modify_super_graph(layers):
         eta = sn.belief.lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, sn.belief.lam)
         sn.belief  = new_belief
-        #sn.prior = NdimGaussian(sn.dofs, 0.01*sn.mu, 0.01*np.eye(sn.dofs))
+        #sn.prior = NdimGaussian(sn.dofs, 0.00000001*sn.mu, 0.00000001*np.eye(sn.dofs))
 
     # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
     # Idea: for the side of the super factor f_sup connected to variable sid:
@@ -1319,30 +1334,49 @@ def vloop(layers):
     """
 
     # ---- bottom-up ----
-    if layers and "graph" in layers[0]:
+    if layers[0]["graph"].factors[0].iters_since_relin >= layers[0]["graph"].min_linear_iters:
         layers[0]["graph"].synchronous_iteration()
-        
-    for i in range(1, len(layers)):
-        # After build, one iteration per layer
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
 
-        name = layers[i]["name"]
-        if name.startswith("super1"):
-            # Update super using the previous layer's graph
-            # layers[i]["graph"] = build_super_graph(layers[:i+1])
-            bottom_up_modify_super_graph(layers[:i+1])
+        for i in range(1, len(layers)):
+            name = layers[i]["name"]
+            if name.startswith("super"):
+                # Update super using the previous layer's graph
+                layers[i]["graph"] = build_super_graph(layers[:i+1])
 
-        elif name.startswith("super"):
-            # Update super using the previous layer's graph
-            layers[i]["graph"] = build_super_graph(layers[:i+1])
+            elif name.startswith("abs"):
+                # Rebuild abs using the previous super
+                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=3)
+                layers[i]["graph"] = abs_graph
+                layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
-        elif name.startswith("abs"):
-            # Rebuild abs using the previous super
-            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=2)
-            layers[i]["graph"] = abs_graph
-            layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
+            # After build, one iteration per layer
+            if "graph" in layers[i]:
+                layers[i]["graph"].synchronous_iteration()
 
+    else:
+        layers[0]["graph"].synchronous_iteration()
+
+        for i in range(1, len(layers)):
+            name = layers[i]["name"]
+            if name.startswith("super1"):
+                # Update super using the previous layer's graph
+                # layers[i]["graph"] = build_super_graph(layers[:i+1])
+                bottom_up_modify_super_graph(layers[:i+1])
+
+            elif name.startswith("super"):
+                # Update super using the previous layer's graph
+                layers[i]["graph"] = build_super_graph(layers[:i+1])
+
+            elif name.startswith("abs"):
+                # Rebuild abs using the previous super
+                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=3)
+                layers[i]["graph"] = abs_graph
+                layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
+
+            # After build, one iteration per layer
+            if "graph" in layers[i]:
+                layers[i]["graph"].synchronous_iteration()
+            
 
     # ---- top-down (pass mu) ----
     for i in range(len(layers) - 1, 0, -1):
@@ -1352,6 +1386,8 @@ def vloop(layers):
         # this is very important, but dont know why yet
         # so abs layer need more iterations
         if name.startswith("abs"):
+            
+            layers[i]["graph"].synchronous_iteration()  
             layers[i]["graph"].synchronous_iteration()  
 
         name = layers[i]["name"]
@@ -1597,6 +1633,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
             # Ensure super graph has run at least once
             layers[-1]["graph"].synchronous_iteration() 
+            layers[-1]["graph"].synchronous_iteration()
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
             layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=2)
@@ -1611,6 +1648,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                 super_nodes, super_edges, node_map = fuse_to_super_order(last["nodes"], last["edges"], int(kk or 8), super_layer_idx, tail_heavy=True)
             # Ensure super graph has run at least once
             layers[-1]["graph"].synchronous_iteration() 
+            layers[-1]["graph"].synchronous_iteration()
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
             layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
