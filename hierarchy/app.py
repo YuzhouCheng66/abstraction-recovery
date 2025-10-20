@@ -765,6 +765,7 @@ def build_super_graph(layers):
 
 
     fg.n_factor_nodes = len(fg.factors)
+    print(1)
     return fg
 
 
