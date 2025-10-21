@@ -902,14 +902,13 @@ def build_abs_graph(
     Bs = {}
     ks = {}
     k2s = {}
-    r = 3
 
     # === 1. Build Abstraction Variables ===
     abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
     sup_fg = layers[-2]["graph"]
 
     for sn in sup_fg.var_nodes:
-        if sn.dofs <= r:
+        if sn.dofs <= r_reduced:
             r = sn.dofs  # No reduction if dofs already <= r
         else:
             r = r_reduced
@@ -941,8 +940,8 @@ def build_abs_graph(
 
         v = VariableNode(sid, dofs=r)
         v.GT = sn.GT
-        v.prior.lam = 1e-10 * B_reduced.T @ sn.belief.lam @ B_reduced
-        v.prior.eta = 1e-10 * B_reduced.T @ sn.belief.eta
+        v.prior.lam = 1e-10 * varis_abs_lam
+        v.prior.eta = 1e-10 * varis_abs_eta
         v.mu = varis_abs_mu
         v.Sigma = varis_abs_sigma
         v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
@@ -1136,7 +1135,6 @@ def top_down_modify_base_and_abs_graph(layers):
             v.belief = new_belief
             v.prior = NdimGaussian(v.dofs, 1e-10*eta, 1e-10*v.belief.lam)
 
-
             # 3. Sync to adjacent factors (this step is important)
             if v.adj_factors:
                 n_adj = len(v.adj_factors)
@@ -1150,8 +1148,8 @@ def top_down_modify_base_and_abs_graph(layers):
                         f.adj_beliefs[idx] = new_belief
                         # correct coresponding message
                         msg = f.messages[idx]
-                        msg.eta += 0.1*d_eta / n_adj
-                        msg.lam += 0.1*d_lam / n_adj
+                        msg.eta += d_eta / n_adj
+                        msg.lam += d_lam / n_adj
                         f.messages[idx] = msg
 
     return base_graph

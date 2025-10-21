@@ -520,7 +520,7 @@ def build_noisy_pose_graph(
     return fg
 
 
-def build_super_graph(layers):
+def build_super_graph(layers, eta_damping=0.4):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -557,7 +557,7 @@ def build_super_graph(layers):
 
 
     # ---------- Create super VariableNodes ----------
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
 
     super_var_nodes = {}
     for i, sn in enumerate(super_nodes):
@@ -769,7 +769,8 @@ def build_super_graph(layers):
 
 def build_abs_graph(
     layers,
-    r_reduced = 2):
+    r_reduced = 2,
+    eta_damping=0):
 
     abs_var_nodes = {}
     Bs = {}
@@ -777,7 +778,7 @@ def build_abs_graph(
     k2s = {}
 
     # === 1. Build Abstraction Variables ===
-    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
     sup_fg = layers[-2]["graph"]
 
     for sn in sup_fg.var_nodes:
