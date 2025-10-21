@@ -1253,7 +1253,9 @@ def vloop(layers):
             # Project abs.mu back to super
             top_down_modify_super_graph(layers[:i+1])
 
-
+    if layers and "graph" in layers[0]:
+        layers[0]["graph"].synchronous_iteration()
+        
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
 

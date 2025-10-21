@@ -1013,8 +1013,7 @@ def build_abs_graph(
 
 def bottom_up_modify_super_graph(layers):
     """
-    Update super-node means (mu) from base nodes,
-    and simultaneously adjust variable beliefs and adjacent messages.
+    modify the super graph's meas_fn and jac_fn according to the base graph's current jacobians.
     """
 
     base_graph = layers[-2]["graph"]
@@ -1030,45 +1029,6 @@ def bottom_up_modify_super_graph(layers):
 
     sid2idx = {sn["data"]["id"]: i for i, sn in enumerate(layers[-1]["nodes"])}
 
-    for sid, group in super_groups.items():
-        mu_blocks = [id2var[bid].mu for bid in group]
-        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(0)
-
-        if sid in sid2idx:
-            idx = sid2idx[sid]
-            v = super_graph.var_nodes[idx]
-
-            # Old belief
-            old_belief = v.belief
-
-            # 1. Update mu
-            #v.mu = mu_super
-
-            # 2. New belief (use old Sigma + new mu)
-            #lam = np.linalg.inv(v.Sigma)
-            #eta = lam @ v.mu
-            #new_belief = NdimGaussian(v.dofs, eta, lam)
-            #v.belief = new_belief
-            #v.prior = NdimGaussian(v.dofs)
-
-
-        """
-            # 3. update adj_beliefs and messages
-            if v.adj_factors:
-                n_adj = len(v.adj_factors)
-                d_eta = new_belief.eta - old_belief.eta
-                d_lam = new_belief.lam - old_belief.lam
-                for f in v.adj_factors:
-                    if v in f.adj_var_nodes:
-                        idx_in_factor = f.adj_var_nodes.index(v)
-                        # update factor's adj_belief
-                        f.adj_beliefs[idx_in_factor] = new_belief
-                        # update corresponding messages
-                        msg = f.messages[idx_in_factor]
-                        msg.eta += d_eta / n_adj
-                        msg.lam += d_lam / n_adj
-                        f.messages[idx_in_factor] = msg
-        """
 
 
 def top_down_modify_base_and_abs_graph(layers):
@@ -1328,65 +1288,63 @@ class VGraph:
         #self.mus = []
 
 
-def vloop(layers,
-    num_iterations=10):
-    """
-    Simplified V-cycle:
-    1) bottom-up: rebuild and iterate once for base / super / abs in order
-    2) top-down: propagate mu from super -> base
-    3) refresh gbp_result on each layer for UI use
-    """
+    def vloop(self):
+        """
+        Simplified V-cycle:
+        1) bottom-up: rebuild and iterate once for base / super / abs in order
+        2) top-down: propagate mu from super -> base
+        3) refresh gbp_result on each layer for UI use
+        """
 
-    # ---- bottom-up ----
-    if layers and "graph" in layers[0]:
-        layers[0]["graph"].synchronous_iteration()
-        
-    for i in range(1, len(layers)):
-        name = layers[i]["name"]
+        layers = self.layers
 
-        if name.startswith("super1"):
-            # Update super using the previous layer's graph
-            # layers[i]["graph"] = build_super_graph(layers[:i+1])
-            #layers[i]["graph"].synchronous_iteration()
-            bottom_up_modify_super_graph(layers[:i+1])
-            #build_super_graph(layers[:i+1])
+        # ---- bottom-up ----
+        if layers and "graph" in layers[0]:
+            layers[0]["graph"].synchronous_iteration()
+            
+        for i in range(1, len(layers)):
+            name = layers[i]["name"]
 
-        elif name.startswith("super"):
-            # Update super using the previous layer's graph
-            layers[i]["graph"] = build_super_graph(layers[:i+1])
+            if name.startswith("super1"):
+                # Update super using the previous base graph's new linearization points
+                bottom_up_modify_super_graph(layers[:i+1])
 
-        elif name.startswith("abs"):
-            # Rebuild abs using the previous super
-            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1])
-            layers[i]["graph"] = abs_graph
-            layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
+            elif name.startswith("super"):
+                # Update super using the previous layer's graph
+                layers[i]["graph"] = build_super_graph(layers[:i+1])
 
-        # After build, one iteration per layer
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
+            elif name.startswith("abs"):
+                # Rebuild abs using the previous super
+                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1])
+                layers[i]["graph"] = abs_graph
+                layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
-    # ---- top-down (pass mu) ----
-    for i in range(len(layers) - 1, 0, -1):
-        # After two iterations per layer, reproject
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
-        # this is very important, but dont know why yet
-        # so abs layer need more iterations
-        if name.startswith("abs"):
-            layers[i]["graph"].synchronous_iteration()  
+            # After build, one iteration per layer
+            if "graph" in layers[i]:
+                layers[i]["graph"].synchronous_iteration()
 
-        name = layers[i]["name"]
-        if name.startswith("super"):
-            # Split super.mu back to base/abs
-            top_down_modify_base_and_abs_graph(layers[:i+1])
+        # ---- top-down (pass mu) ----
+        for i in range(len(layers) - 1, 0, -1):
+            # After two iterations per layer, reproject
+            if "graph" in layers[i]:
+                layers[i]["graph"].synchronous_iteration()
+            # this is very important, but dont know why yet
+            # so abs layer need more iterations
+            if name.startswith("abs"):
+                layers[i]["graph"].synchronous_iteration()  
 
-        elif name.startswith("abs"):
-            # Project abs.mu back to super
-            top_down_modify_super_graph(layers[:i+1])
+            name = layers[i]["name"]
+            if name.startswith("super"):
+                # Split super.mu back to base/abs
+                top_down_modify_base_and_abs_graph(layers[:i+1])
+
+            elif name.startswith("abs"):
+                # Project abs.mu back to super
+                top_down_modify_super_graph(layers[:i+1])
 
 
-    # ---- refresh gbp_result for UI ----
-    refresh_gbp_results(layers)
+        # ---- refresh gbp_result for UI ----
+        refresh_gbp_results(layers)
 
 
 # -----------------------
