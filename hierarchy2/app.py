@@ -296,10 +296,10 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
     # Group sizes
     base = n // k
     rem  = n %  k
-    if tail_heavy:
-        sizes = [base]*(k-1) + [base+rem]     # Tail absorbs remainder: ..., last += rem
+    if rem > 0:
+        sizes = [k]*(base) + [rem]     # Tail absorbs remainder: ..., last += rem
     else:
-        sizes = [base+1]*rem + [base]*(k-rem) # Evenly distribute remainder (optional)
+        sizes = [k]*(base)
 
     # Build groups: record indices per group
     groups = []
@@ -630,7 +630,7 @@ def build_noisy_pose_graph(
     return fg
 
 
-def build_super_graph(layers):
+def build_super_graph(layers, eta_damping=0.2):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -667,7 +667,7 @@ def build_super_graph(layers):
 
 
     # ---------- Create super VariableNodes ----------
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
 
     super_var_nodes = {}
     for i, sn in enumerate(super_nodes):
@@ -675,50 +675,34 @@ def build_super_graph(layers):
         dofs = total_dofs.get(sid, 0)
 
         v = VariableNode(i, dofs=dofs)
+        gt_vec = np.zeros(dofs)
+        mu_blocks = []
+        Sigma_blocks = []
+        for bid, (st, d) in local_idx[sid].items():
+            # === Stack base GT ===
+            gt_base = getattr(id2var[bid], "GT", None)
+            if gt_base is None or len(gt_base) != d:
+                gt_base = np.zeros(d)
+            gt_vec[st:st+d] = gt_base
 
-        # === Preallocate ===
-        local       = local_idx.get(sid, {})  # {bid: (st, d)}
-        gt_vec      = np.zeros(dofs, dtype=float)
-        prior_lam   = np.zeros((dofs, dofs), dtype=float)
-        prior_eta   = np.zeros(dofs, dtype=float)
-        mu_super    = np.zeros(dofs, dtype=float)
-        Sigma_super = np.zeros((dofs, dofs), dtype=float)
-
-        # === Single pass fill: GT, prior, mu, Sigma ===
-        for bid in local:
-            st, d = local[bid]
+            # === Stack base belief ===
             vb = id2var[bid]
+            mu_blocks.append(vb.mu)
+            Sigma_blocks.append(vb.Sigma)
 
-            # GT
-            gt_base = getattr(vb, "GT", None)
-            if gt_base is not None and len(gt_base) == d:
-                gt_vec[st:st+d] = gt_base  # otherwise 0
-
-            # prior（concatenate）
-            prior_lam[st:st+d, st:st+d] = vb.prior.lam
-            prior_eta[st:st+d]          = vb.prior.eta
-
-            # belief
-            mu_super[st:st+d]                 = vb.mu
-            Sigma_super[st:st+d, st:st+d]     = vb.Sigma
-
-        # write back
+        super_var_nodes[sid] = v
         v.GT = gt_vec
-        v.prior.lam = prior_lam
-        v.prior.eta = prior_eta
 
-        # belief & natural params
-        if dofs > 0:
-            lam = np.linalg.inv(Sigma_super)
-            eta = lam @ mu_super
-        else:
-            lam = np.zeros((0, 0)); eta = np.zeros(0, dtype=float)
-
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
+        Sigma_super = block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
+        lam = np.linalg.inv(Sigma_super)
+        eta = lam @ mu_super
         v.mu = mu_super
         v.Sigma = Sigma_super
         v.belief = NdimGaussian(dofs, eta, lam)
+        v.prior.lam = 1e-10 * lam
+        v.prior.eta = 1e-10 * eta
 
-        super_var_nodes[sid] = v
         fg.var_nodes.append(v)
 
 
@@ -896,7 +880,8 @@ def build_super_graph(layers):
 
 def build_abs_graph(
     layers,
-    r_reduced = 3):
+    r_reduced = 3,
+    eta_damping=0):
 
     abs_var_nodes = {}
     Bs = {}
@@ -904,7 +889,7 @@ def build_abs_graph(
     k2s = {}
 
     # === 1. Build Abstraction Variables ===
-    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
     sup_fg = layers[-2]["graph"]
 
     for sn in sup_fg.var_nodes:
@@ -1322,8 +1307,29 @@ def refresh_gbp_results(layers):
         L["gbp_result"] = res
 
 
+class VGraph:
+    def __init__(self,
+                 layers,
+                 nonlinear_factors=True,
+                 eta_damping=0.1,
+                 beta=0.0,
+                 num_undamped_iters=0,
+                 min_linear_iters=5,
+                 wild_thresh=0):
 
-def vloop(layers):
+        self.layers = layers
+        self.nonlinear_factors = nonlinear_factors
+        self.eta_damping = eta_damping
+        self.wild_thresh = wild_thresh
+
+        #self.energy_history = []
+        #self.error_history = []
+        #self.nmsgs_history = []
+        #self.mus = []
+
+
+def vloop(layers,
+    num_iterations=10):
     """
     Simplified V-cycle:
     1) bottom-up: rebuild and iterate once for base / super / abs in order
@@ -1332,49 +1338,32 @@ def vloop(layers):
     """
 
     # ---- bottom-up ----
-    if layers[0]["graph"].factors[0].iters_since_relin >= layers[0]["graph"].min_linear_iters:
+    if layers and "graph" in layers[0]:
         layers[0]["graph"].synchronous_iteration()
+        
+    for i in range(1, len(layers)):
+        name = layers[i]["name"]
 
-        for i in range(1, len(layers)):
-            name = layers[i]["name"]
-            if name.startswith("super"):
-                # Update super using the previous layer's graph
-                layers[i]["graph"] = build_super_graph(layers[:i+1])
+        if name.startswith("super1"):
+            # Update super using the previous layer's graph
+            # layers[i]["graph"] = build_super_graph(layers[:i+1])
+            #layers[i]["graph"].synchronous_iteration()
+            bottom_up_modify_super_graph(layers[:i+1])
+            #build_super_graph(layers[:i+1])
 
-            elif name.startswith("abs"):
-                # Rebuild abs using the previous super
-                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=3)
-                layers[i]["graph"] = abs_graph
-                layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
+        elif name.startswith("super"):
+            # Update super using the previous layer's graph
+            layers[i]["graph"] = build_super_graph(layers[:i+1])
 
-            # After build, one iteration per layer
-            if "graph" in layers[i]:
-                layers[i]["graph"].synchronous_iteration()
+        elif name.startswith("abs"):
+            # Rebuild abs using the previous super
+            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1])
+            layers[i]["graph"] = abs_graph
+            layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
-    else:
-        layers[0]["graph"].synchronous_iteration()
-
-        for i in range(1, len(layers)):
-            name = layers[i]["name"]
-            if name.startswith("super1"):
-                # Update super using the previous layer's graph
-                # layers[i]["graph"] = build_super_graph(layers[:i+1])
-                bottom_up_modify_super_graph(layers[:i+1])
-
-            elif name.startswith("super"):
-                # Update super using the previous layer's graph
-                layers[i]["graph"] = build_super_graph(layers[:i+1])
-
-            elif name.startswith("abs"):
-                # Rebuild abs using the previous super
-                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=3)
-                layers[i]["graph"] = abs_graph
-                layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
-
-            # After build, one iteration per layer
-            if "graph" in layers[i]:
-                layers[i]["graph"].synchronous_iteration()
-            
+        # After build, one iteration per layer
+        if "graph" in layers[i]:
+            layers[i]["graph"].synchronous_iteration()
 
     # ---- top-down (pass mu) ----
     for i in range(len(layers) - 1, 0, -1):
@@ -1384,14 +1373,13 @@ def vloop(layers):
         # this is very important, but dont know why yet
         # so abs layer need more iterations
         if name.startswith("abs"):
-            
-            layers[i]["graph"].synchronous_iteration()  
             layers[i]["graph"].synchronous_iteration()  
 
         name = layers[i]["name"]
         if name.startswith("super"):
             # Split super.mu back to base/abs
             top_down_modify_base_and_abs_graph(layers[:i+1])
+
         elif name.startswith("abs"):
             # Project abs.mu back to super
             top_down_modify_super_graph(layers[:i+1])

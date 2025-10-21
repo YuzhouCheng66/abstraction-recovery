@@ -520,7 +520,7 @@ def build_noisy_pose_graph(
     return fg
 
 
-def build_super_graph(layers, eta_damping=0.4):
+def build_super_graph(layers, eta_damping=0.2):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -565,28 +565,26 @@ def build_super_graph(layers, eta_damping=0.4):
         dofs = total_dofs.get(sid, 0)
 
         v = VariableNode(i, dofs=dofs)
-
-        # === Stack base GT ===
         gt_vec = np.zeros(dofs)
+        mu_blocks = []
+        Sigma_blocks = []
         for bid, (st, d) in local_idx[sid].items():
+            # === Stack base GT ===
             gt_base = getattr(id2var[bid], "GT", None)
             if gt_base is None or len(gt_base) != d:
                 gt_base = np.zeros(d)
             gt_vec[st:st+d] = gt_base
-        v.GT = gt_vec
-        super_var_nodes[sid] = v
-        fg.var_nodes.append(v)
 
-        # === Stack base belief ===
-        mu_blocks = []
-        Sigma_blocks = []
-        for bid, (st, d) in local_idx[sid].items():
+            # === Stack base belief ===
             vb = id2var[bid]
             mu_blocks.append(vb.mu)
             Sigma_blocks.append(vb.Sigma)
+
+        super_var_nodes[sid] = v
+        v.GT = gt_vec
+
         mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
         Sigma_super = block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
-
         lam = np.linalg.inv(Sigma_super)
         eta = lam @ mu_super
         v.mu = mu_super
@@ -594,6 +592,8 @@ def build_super_graph(layers, eta_damping=0.4):
         v.belief = NdimGaussian(dofs, eta, lam)
         v.prior.lam = 1e-10 * lam
         v.prior.eta = 1e-10 * eta
+
+        fg.var_nodes.append(v)
 
     fg.n_var_nodes = len(fg.var_nodes)
 
@@ -647,6 +647,7 @@ def build_super_graph(layers, eta_damping=0.4):
                 x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
 
                 Jloc = f.jac_fn(x_loc)
+                
                 # Map Jloc column blocks back to the super variable columns
                 row = np.zeros((Jloc.shape[0], ncols))
                 c0 = 0
@@ -1215,8 +1216,9 @@ def vloop(layers):
             # Update super using the previous layer's graph
             # layers[i]["graph"] = build_super_graph(layers[:i+1])
             #layers[i]["graph"].synchronous_iteration()
-            bottom_up_modify_super_graph(layers[:i+1])
+            #bottom_up_modify_super_graph(layers[:i+1])
             #build_super_graph(layers[:i+1])
+            pass
 
         elif name.startswith("super"):
             # Update super using the previous layer's graph
@@ -1224,7 +1226,7 @@ def vloop(layers):
 
         elif name.startswith("abs"):
             # Rebuild abs using the previous super
-            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=2)
+            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1])
             layers[i]["graph"] = abs_graph
             layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
@@ -1488,7 +1490,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             layers[-1]["graph"].synchronous_iteration() 
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
-            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=2)
+            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers)
         else:
             k_next = pair_idx + 1
             super_layer_idx = k_next*2 - 1
