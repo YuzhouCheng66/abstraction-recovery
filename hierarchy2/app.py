@@ -4,6 +4,7 @@ from dash import html, dcc, Input, Output, State, no_update
 import dash_cytoscape as cyto
 import numpy as np
 from scipy.linalg import block_diag
+from collections import defaultdict
 
 # ==== GBP import ====
 from gbp.gbp import *
@@ -508,8 +509,7 @@ def build_noisy_pose_graph(
                     [-s, c]])
         dp = np.array([xj - xi, yj - yi])
         r  = RT @ dp                    # [rx, ry]
-        dr_dthi = np.array([ r[1], -r[0] ])   # ← corrected ∂r/∂θi
-
+        dr_dthi = np.array([ r[1], -r[0] ])  
         J = np.zeros((3, 6), dtype=float)
         # wrt i
         J[0:2, 0:2] = -RT
@@ -543,7 +543,7 @@ def build_noisy_pose_graph(
     # Strong anchor: fix global reference (optionally anchor only x,y by relaxing Lambda_anchor[2,2])
     v0 = var_nodes[0]
     z_anchor = v0.GT.copy()
-    Lambda_anchor = np.diag(1.0 / (np.array([1e-3, 1e-3, 1e-4])**2))
+    Lambda_anchor = np.diag(1.0 / (np.array([1e-3, 1e-3, 1e-5])**2))
     f0 = Factor(fid, [v0], z_anchor, Lambda_anchor, meas_fn_unary, jac_fn_unary)
     f0.type = "prior"
     f0.compute_factor(linpoint=z_anchor, update_self=True)
@@ -1009,6 +1009,188 @@ def build_abs_graph(
 
 
     return abs_fg, Bs, ks, k2s
+
+
+
+def update_super_graph_linearized(layers):
+    """
+    用 base_graph 当前位置的线性化结果，冻结 super_graph 的因子为线性：
+      meas(x) = H @ x + c,  jac(x) = H
+    仅就地修改因子的 meas_fn / jac_fn / measurement / measurement_lambda。
+    """
+    base_graph  = layers[-2]["graph"]
+    super_layer = layers[-1]
+    super_graph = super_layer.get("graph", None)
+
+    # 若还没有 super_graph，就按你原来的构建一次骨架（之后都走“刷新”）
+    if super_graph is None:
+        super_graph = build_super_graph(layers)   # 只需首次
+        super_layer["graph"] = super_graph
+
+    node_map     = super_layer["node_map"]     # { base_id(str) -> super_id(str) }
+    super_nodes  = super_layer["nodes"]
+    id2var_base  = {vn.variableID: vn for vn in base_graph.var_nodes}
+    int2sid      = {i: str(super_nodes[i]["data"]["id"]) for i in range(len(super_nodes))}
+
+    # ---------- super_id -> [base_id] ----------
+    super_groups = defaultdict(list)
+    for b_str, s_id in node_map.items():
+        super_groups[str(s_id)].append(int(b_str))
+
+    # ---------- local 索引 & 维度 ----------
+    local_idx   = {}  # {sid: {bid: (start, d)}}
+    total_dofs  = {}  # {sid: sum d}
+    for sid, group in super_groups.items():
+        off, ld = 0, {}
+        for bid in group:
+            d = id2var_base[bid].dofs
+            ld[bid] = (off, d)
+            off += d
+        local_idx[sid]  = ld
+        total_dofs[sid] = off
+
+    # ---------- 预分类 base 因子：组内(intra) / 跨组(inter) ----------
+    intra = defaultdict(list)        # sid -> [base_factor]
+    inter = defaultdict(list)        # (sidA,sidB) (排序后) -> [base_factor]
+
+    # 反向索引：base_id -> sid（加速）
+    baseid2sid = {}
+    for sid, group in super_groups.items():
+        for bid in group:
+            baseid2sid[bid] = sid
+
+    for f in base_graph.factors:
+        vids = [v.variableID for v in f.adj_var_nodes]
+        if not vids:
+            continue
+        sids = [baseid2sid.get(vid, None) for vid in vids]
+        if any(s is None for s in sids):
+            continue
+        uniq = sorted(set(sids))
+        if len(uniq) == 1:
+            intra[uniq[0]].append(f)
+        elif len(uniq) == 2:
+            inter[tuple(uniq)].append(f)
+        # 高元数忽略
+
+    # ---------- 工具：冻结线性测量 ----------
+    def frozen_meas_jac(H, c):
+        H = np.ascontiguousarray(H)
+        c = np.ascontiguousarray(c)
+        def meas_fn(x, *args):
+            return H @ x + c
+        def jac_fn(x, *args):
+            return H
+        return meas_fn, jac_fn
+
+    # ---------- 覆盖 super 因子 ----------
+    for f_sup in super_graph.factors:
+        arity = len(f_sup.adj_var_nodes)
+        if arity == 1:
+            # super prior（组内）
+            sid_int = f_sup.adj_var_nodes[0].variableID
+            sid     = int2sid[sid_int]
+            ncols   = total_dofs.get(sid, 0)
+            ld      = local_idx.get(sid, {})
+            fs      = intra.get(sid, [])
+            if not fs or ncols == 0:
+                continue
+
+            H_rows, c_rows, z_list, L_list = [], [], [], []
+            for fb in fs:
+                vids = [v.variableID for v in fb.adj_var_nodes]
+                # 线性点：用 base 的 mu（该 base 因子自己的拼接顺序）
+                x0 = np.concatenate([id2var_base[vid].mu for vid in vids]) if vids else np.zeros(0)
+                J  = fb.jac_fn(x0)
+                h0 = fb.meas_fn(x0)
+                c  = h0 - J @ x0
+
+                row = np.zeros((J.shape[0], ncols), dtype=float)
+                c0  = 0
+                for vid in vids:
+                    st, d = ld[vid]
+                    row[:, st:st+d] = J[:, c0:c0+d]
+                    c0 += d
+
+                H_rows.append(row)
+                c_rows.append(c)
+                z_list.append(fb.measurement)
+                L_list.append(fb.measurement_lambda)
+
+            H = np.vstack(H_rows) if H_rows else np.zeros((0, ncols))
+            c = np.concatenate(c_rows) if c_rows else np.zeros(0)
+            z = np.concatenate(z_list) if z_list else np.zeros(0)
+            L = block_diag(*L_list)    if L_list else np.zeros((0, 0))
+
+            meas_fn, jac_fn = frozen_meas_jac(H, c)
+            f_sup.meas_fn = meas_fn
+            f_sup.jac_fn  = jac_fn
+            f_sup.measurement        = z
+            f_sup.measurement_lambda = L
+            f_sup.type = "super_prior_lin"
+
+            # 刷新（线性因子但仍让内部缓存一致）
+            x_lin = f_sup.adj_var_nodes[0].mu
+            f_sup.compute_factor(linpoint=x_lin, update_self=True)
+
+        elif arity == 2:
+            # super between（跨组）
+            sidA_int, sidB_int = f_sup.adj_var_nodes[0].variableID, f_sup.adj_var_nodes[1].variableID
+            sidA, sidB = int2sid[sidA_int], int2sid[sidB_int]
+            key  = (sidA, sidB) if sidA < sidB else (sidB, sidA)
+            fs   = inter.get(key, [])
+            if not fs:
+                continue
+
+            nA, nB = total_dofs[sidA], total_dofs[sidB]
+            idxA, idxB = local_idx[sidA], local_idx[sidB]
+
+            H_rows, c_rows, z_list, L_list = [], [], [], []
+
+            for fb in fs:
+                vids = [v.variableID for v in fb.adj_var_nodes]
+                if len(vids) != 2:
+                    continue
+                i, j = vids
+                x0 = np.concatenate([id2var_base[i].mu, id2var_base[j].mu])
+                J  = fb.jac_fn(x0)
+                h0 = fb.meas_fn(x0)
+                c  = h0 - J @ x0
+
+                row = np.zeros((J.shape[0], nA + nB), dtype=float)
+                # 把 (i,j) 的列映射到 [A | B]
+                if i in super_groups[sidA]:
+                    si, di = idxA[i]; sj, dj = idxB[j]
+                    row[:, si:si+di]         = J[:, :di]
+                    row[:, nA+sj:nA+sj+dj]   = J[:, di:di+dj]
+                else:
+                    si, di = idxB[i]; sj, dj = idxA[j]
+                    row[:, nA+si:nA+si+di]   = J[:, :di]
+                    row[:, sj:sj+dj]         = J[:, di:di+dj]
+
+                H_rows.append(row)
+                c_rows.append(c)
+                z_list.append(fb.measurement)
+                L_list.append(fb.measurement_lambda)
+
+            H = np.vstack(H_rows) if H_rows else np.zeros((0, nA+nB))
+            c = np.concatenate(c_rows) if c_rows else np.zeros(0)
+            z = np.concatenate(z_list) if z_list else np.zeros(0)
+            L = block_diag(*L_list)    if L_list else np.zeros((0, 0))
+
+            meas_fn, jac_fn = frozen_meas_jac(H, c)
+            f_sup.meas_fn = meas_fn
+            f_sup.jac_fn  = jac_fn
+            f_sup.measurement        = z
+            f_sup.measurement_lambda = L
+            f_sup.type = "super_between_lin"
+
+            x_lin = np.concatenate([f_sup.adj_var_nodes[0].mu,
+                                    f_sup.adj_var_nodes[1].mu])
+            f_sup.compute_factor(linpoint=x_lin, update_self=True)
+
+    # 不动 super_graph.var_nodes / 拓扑，因而 super_graph.n_factor_nodes 无需改
+    return super_graph
 
 
 def bottom_up_modify_super_graph(layers):
@@ -1557,8 +1739,8 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         # Build the GBP graph (rendering still shows GT at this point)
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
-                                           odom_sigma=float(pOdom or 1.0)
-                                           )
+                                           odom_sigma=float(pOdom or 1.0),
+                                           rng=rng)
         layers[0]["graph"] = gbp_graph
         opts=[{"label":"base","value":"base"}]
         return opts, "base"
@@ -1873,4 +2055,4 @@ def unified_solver(gbp_click, gbp_ticks,
 
 # -----------------------
 if __name__=="__main__":
-    app.run(debug=True, port=8050)
+    app.run(debug=True, port=8051)

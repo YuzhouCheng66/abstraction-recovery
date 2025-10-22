@@ -4,12 +4,261 @@ from dash import html, dcc, Input, Output, State, no_update
 import dash_cytoscape as cyto
 import numpy as np
 from scipy.linalg import block_diag
+from collections import defaultdict
 
 # ==== GBP import ====
 from gbp.gbp import *
 
 app = dash.Dash(__name__)
 app.title = "Factor Graph SVD Abs&Recovery"
+
+
+
+def update_super_graph_linearized(layers, eta_damping=0.2):
+    """
+    Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
+    Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
+    layers[-1]["node_map"]: { base_node_id (str, e.g., 'b12') -> super_node_id (str) }
+    """
+    # ---------- Extract base & super ----------
+    base_graph = layers[-2]["graph"]
+    super_nodes = layers[-1]["nodes"]
+    super_edges = layers[-1]["edges"]
+    node_map    = layers[-1]["node_map"]   # 'bN' -> 'sX_...'
+
+    # base: id(int) -> VariableNode, handy to query dofs and mu
+    id2var = {vn.variableID: vn for vn in base_graph.var_nodes}
+
+    # ---------- super_id -> [base_id(int)] ----------
+    super_groups = {}
+    for b_str, s_id in node_map.items():
+        b_int = int(b_str)
+        super_groups.setdefault(s_id, []).append(b_int)
+
+
+    # ---------- For each super group, build a (start, dofs) table ----------
+    # local_idx[sid][bid] = (start, dofs), total_dofs[sid] = sum(dofs)
+    local_idx   = {}
+    total_dofs  = {}
+    for sid, group in super_groups.items():
+        off = 0
+        local_idx[sid] = {}
+        for bid in group:
+            d = id2var[bid].dofs
+            local_idx[sid][bid] = (off, d)
+            off += d
+        total_dofs[sid] = off
+
+
+    # ---------- Create super VariableNodes ----------
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
+
+    super_var_nodes = {}
+    for i, sn in enumerate(super_nodes):
+        sid = sn["data"]["id"]
+        dofs = total_dofs.get(sid, 0)
+
+        v = VariableNode(i, dofs=dofs)
+        gt_vec = np.zeros(dofs)
+        mu_blocks = []
+        Sigma_blocks = []
+        for bid, (st, d) in local_idx[sid].items():
+            # === Stack base GT ===
+            gt_base = getattr(id2var[bid], "GT", None)
+            if gt_base is None or len(gt_base) != d:
+                gt_base = np.zeros(d)
+            gt_vec[st:st+d] = gt_base
+
+            # === Stack base belief ===
+            vb = id2var[bid]
+            mu_blocks.append(vb.mu)
+            Sigma_blocks.append(vb.Sigma)
+
+        super_var_nodes[sid] = v
+        v.GT = gt_vec
+
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
+        Sigma_super = block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
+        lam = np.linalg.inv(Sigma_super)
+        eta = lam @ mu_super
+        v.mu = mu_super
+        v.Sigma = Sigma_super
+        v.belief = NdimGaussian(dofs, eta, lam)
+        v.prior.lam = 1e-10 * lam
+        v.prior.eta = 1e-10 * eta
+
+        fg.var_nodes.append(v)
+
+
+    fg.n_var_nodes = len(fg.var_nodes)
+
+    # ---------- Utility: assemble a group's linpoint (using base belief means) ----------
+    def make_linpoint_for_group(sid):
+        x = np.zeros(total_dofs[sid])
+        for bid, (st, d) in local_idx[sid].items():
+            mu = getattr(id2var[bid], "mu", None)
+            if mu is None or len(mu) != d:
+                mu = np.zeros(d)
+            x[st:st+d] = mu
+        return x
+
+    # ---------- 3) super prior (in-group unary + in-group binary) ----------
+    def make_super_prior_factor(sid, base_factors):
+        group = super_groups[sid]
+        idx_map = local_idx[sid]
+        ncols = total_dofs[sid]
+
+        # Select factors whose variables are all within the group (unary or binary)
+        in_group = []
+        for f in base_factors:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            if all(vid in group for vid in vids):
+                in_group.append(f)
+
+        def meas_fn_super_prior(x_super, *args):
+            meas_fn = []
+            for f in in_group:
+                vids = [v.variableID for v in f.adj_var_nodes]
+                # Assemble this factor's local x
+                x_loc_list = []
+                for vid in vids:
+                    st, d = idx_map[vid]
+                    x_loc_list.append(x_super[st:st+d])
+                x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
+                meas_fn.append(f.meas_fn(x_loc))
+            return np.concatenate(meas_fn) if meas_fn else np.zeros(0)
+
+        def jac_fn_super_prior(x_super, *args):
+            Jrows = []
+            for f in in_group:
+                vids = [v.variableID for v in f.adj_var_nodes]
+                # Build this factor's local x for (potentially) nonlinear Jacobian
+                x_loc_list = []
+                dims = []
+                for vid in vids:
+                    st, d = idx_map[vid]
+                    dims.append(d)
+                    x_loc_list.append(x_super[st:st+d])
+                x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
+
+                Jloc = f.jac_fn(x_loc)
+                # Map Jloc column blocks back to the super variable columns
+                row = np.zeros((Jloc.shape[0], ncols))
+                c0 = 0
+                for vid, d in zip(vids, dims):
+                    st, _ = idx_map[vid]
+                    row[:, st:st+d] = Jloc[:, c0:c0+d]
+                    c0 += d
+
+                Jrows.append(row)
+            return np.vstack(Jrows) if Jrows else np.zeros((0, ncols))
+
+        # z_super: concatenate each base factor's z
+        z_list = [f.measurement for f in in_group]
+        z_lambda_list = [f.measurement_lambda for f in in_group]
+        z_super = np.concatenate(z_list) 
+        z_super_lambda = block_diag(*z_lambda_list)
+
+        return meas_fn_super_prior, jac_fn_super_prior, z_super, z_super_lambda 
+
+    # ---------- 4) super between (cross-group binary) ----------
+    def make_super_between_factor(sidA, sidB, base_factors):
+        groupA, groupB = super_groups[sidA], super_groups[sidB]
+        idxA, idxB = local_idx[sidA], local_idx[sidB]
+        nA, nB = total_dofs[sidA], total_dofs[sidB]
+
+        cross = []
+        for f in base_factors:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            if len(vids) != 2:
+                continue
+            i, j = vids
+            # One side in A, the other side in B
+            if (i in groupA and j in groupB) or (i in groupB and j in groupA):
+                cross.append(f)
+
+        def jac_fn_super_between(xAB,*args):
+            Jrows = []
+            for f in cross:
+                i, j = [v.variableID for v in f.adj_var_nodes]
+                if i in groupA:
+                    si, di = idxA[i]
+                    sj, dj = idxB[j]
+                    left_start, right_start = si, nA + sj
+                else:
+                    si, di = idxB[i]
+                    sj, dj = idxA[j]
+                    left_start, right_start = nA + si, sj
+                x_loc = np.concatenate([id2var[i].mu, id2var[j].mu])
+                Jloc = f.jac_fn(x_loc)
+
+                row = np.zeros((Jloc.shape[0], nA + nB))
+                row[:, left_start:left_start+di]   = Jloc[:, :di] 
+                row[:, right_start:right_start+dj] = Jloc[:, di:di+dj] 
+
+                Jrows.append(row)
+            return np.vstack(Jrows) 
+        
+        J = jac_fn_super_between(xAB=np.zeros(nA + nB))
+
+        def meas_fn_super_between(xAB, *args):
+            xA, xB = xAB[:nA], xAB[nA:]
+            x = []
+            for f in cross:
+                i, j = [v.variableID for v in f.adj_var_nodes]
+                if i in groupA:
+                    si, di = idxA[i]
+                    sj, dj = idxB[j]
+                    xi = xA[si:si+di]
+                    xj = xB[sj:sj+dj]
+                else:
+                    si, di = idxB[i]
+                    sj, dj = idxA[j]
+                    xi = xB[si:si+di]
+                    xj = xA[sj:sj+dj]
+                x_loc = np.concatenate([xi, xj])
+                x.append(x_loc)
+            x = np.concatenate(x)
+            print("x.shape",x.shape,"J.shape",J.shape)
+            return J.T@x
+
+
+        z_list = [f.measurement for f in cross]
+        z_lambda_list = [f.measurement_lambda for f in cross]
+        z_super = np.concatenate(z_list) 
+        z_super_lambda = block_diag(*z_lambda_list)
+
+        return meas_fn_super_between, jac_fn_super_between, z_super, z_super_lambda
+
+
+    for e in super_edges:
+        u, v = e["data"]["source"], e["data"]["target"]
+
+        if v == "prior":
+            meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, base_graph.factors)
+            f = Factor(len(fg.factors), [super_var_nodes[u]], z, z_lambda, meas_fn, jac_fn)
+            f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
+            f.type = "super_prior"
+            lin0 = make_linpoint_for_group(u)
+            f.compute_factor(linpoint=lin0, update_self=True)
+            fg.factors.append(f)
+            super_var_nodes[u].adj_factors.append(f)
+            
+        else:
+            meas_fn, jac_fn, z, z_lambda = make_super_between_factor(u, v, base_graph.factors)
+            f = Factor(len(fg.factors), [super_var_nodes[u], super_var_nodes[v]], z, z_lambda, meas_fn, jac_fn)
+            f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
+            f.type = "super_between"
+            lin0 = np.concatenate([make_linpoint_for_group(u), make_linpoint_for_group(v)])
+            f.compute_factor(linpoint=lin0, update_self=True)
+            fg.factors.append(f)
+            super_var_nodes[u].adj_factors.append(f)
+            super_var_nodes[v].adj_factors.append(f)
+
+
+    fg.n_factor_nodes = len(fg.factors)
+    return fg
+
 
 # -----------------------
 # SLAM-like base graph
@@ -520,7 +769,7 @@ def build_noisy_pose_graph(
     return fg
 
 
-def build_super_graph(layers, eta_damping=0.2):
+def build_super_graph(layers, eta_damping=0):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -765,7 +1014,6 @@ def build_super_graph(layers, eta_damping=0.2):
 
     fg.n_factor_nodes = len(fg.factors)
     return fg
-
 
 
 def build_abs_graph(
@@ -1222,7 +1470,8 @@ def vloop(layers):
 
         elif name.startswith("super"):
             # Update super using the previous layer's graph
-            layers[i]["graph"] = build_super_graph(layers[:i+1])
+            #layers[i]["graph"] = build_super_graph(layers[:i+1])
+            layers[i]["graph"] = update_super_graph_linearized(layers[:i+1])
 
         elif name.startswith("abs"):
             # Rebuild abs using the previous super
@@ -1236,13 +1485,14 @@ def vloop(layers):
 
     # ---- top-down (pass mu) ----
     for i in range(len(layers) - 1, 0, -1):
-        # After two iterations per layer, reproject
+        # After one iterations per layer, reproject
         if "graph" in layers[i]:
             layers[i]["graph"].synchronous_iteration()
+
         # this is very important, but dont know why yet
         # so abs layer need more iterations
-        if name.startswith("abs"):
-            layers[i]["graph"].synchronous_iteration()  
+        #if name.startswith("abs"):
+            #layers[i]["graph"].synchronous_iteration()  
 
         name = layers[i]["name"]
         if name.startswith("super"):
@@ -1253,9 +1503,7 @@ def vloop(layers):
             # Project abs.mu back to super
             top_down_modify_super_graph(layers[:i+1])
 
-    if layers and "graph" in layers[0]:
-        layers[0]["graph"].synchronous_iteration()
-        
+
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
 
