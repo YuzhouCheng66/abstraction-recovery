@@ -103,7 +103,7 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
         return x
 
     # ---------- 3) super prior (in-group unary + in-group binary) ----------
-    def make_super_prior_factor(sid, base_factors):
+    def make_super_prior_factor(sid, lin0, base_factors):
         group = super_groups[sid]
         idx_map = local_idx[sid]
         ncols = total_dofs[sid]
@@ -115,19 +115,6 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
             if all(vid in group for vid in vids):
                 in_group.append(f)
 
-        def meas_fn_super_prior(x_super, *args):
-            meas_fn = []
-            for f in in_group:
-                vids = [v.variableID for v in f.adj_var_nodes]
-                # Assemble this factor's local x
-                x_loc_list = []
-                for vid in vids:
-                    st, d = idx_map[vid]
-                    x_loc_list.append(x_super[st:st+d])
-                x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
-                meas_fn.append(f.meas_fn(x_loc))
-            return np.concatenate(meas_fn) if meas_fn else np.zeros(0)
-
         def jac_fn_super_prior(x_super, *args):
             Jrows = []
             for f in in_group:
@@ -138,7 +125,7 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
                 for vid in vids:
                     st, d = idx_map[vid]
                     dims.append(d)
-                    x_loc_list.append(x_super[st:st+d])
+                    x_loc_list.append(lin0[st:st+d])
                 x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
 
                 Jloc = f.jac_fn(x_loc)
@@ -152,6 +139,23 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
 
                 Jrows.append(row)
             return np.vstack(Jrows) if Jrows else np.zeros((0, ncols))
+
+        J = jac_fn_super_prior(x_super=lin0)
+        meas_fn = []
+        for f in in_group:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            # Build this factor's local x for (potentially) nonlinear Jacobian
+            x_loc_list = []
+            dims = []
+            for vid in vids:
+                st, d = idx_map[vid]
+                dims.append(d)
+                x_loc_list.append(lin0[st:st+d])
+            x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
+            meas_fn.append(f.meas_fn(x_loc))
+        meas_fn = np.concatenate(meas_fn) 
+        def meas_fn_super_prior(x_super, *args):
+            return meas_fn + J@(x_super-lin0)
 
         # z_super: concatenate each base factor's z
         z_list = [f.measurement for f in in_group]
@@ -238,11 +242,11 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
         u, v = e["data"]["source"], e["data"]["target"]
 
         if v == "prior":
-            meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, base_graph.factors)
+            lin0 = make_linpoint_for_group(u)
+            meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, lin0, base_graph.factors)
             f = Factor(len(fg.factors), [super_var_nodes[u]], z, z_lambda, meas_fn, jac_fn)
             f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
             f.type = "super_prior"
-            lin0 = make_linpoint_for_group(u)
             f.compute_factor(linpoint=lin0, update_self=True)
             fg.factors.append(f)
             super_var_nodes[u].adj_factors.append(f)
@@ -1826,7 +1830,6 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
             # Ensure super graph has run at least once
             layers[-1]["graph"].synchronous_iteration() 
-
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
             layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers)
         else:

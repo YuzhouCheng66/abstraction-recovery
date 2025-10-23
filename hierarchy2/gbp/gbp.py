@@ -15,10 +15,10 @@ from utils.distances import bhattacharyya, mahalanobis
 class FactorGraph:
     def __init__(self,
                  nonlinear_factors=True,
-                 eta_damping=0.4,
+                 eta_damping=0.2,
                  beta=0.0,
-                 num_undamped_iters=30,
-                 min_linear_iters=40,
+                 num_undamped_iters=0,
+                 min_linear_iters=50,
                  wild_thresh=0):
 
         self.var_nodes = []

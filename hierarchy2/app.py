@@ -475,7 +475,7 @@ def build_noisy_pose_graph(
         return np.array([xj, yj, thj], dtype=float)
 
     # ---------- Graph & variables ----------
-    fg = FactorGraph(nonlinear_factors=True, eta_damping=0)
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
 
     var_nodes = []
     for i, n in enumerate(nodes):
@@ -619,6 +619,7 @@ def build_noisy_pose_graph(
     for v in var_nodes:
         v.prior.lam = Lam_weak
         v.prior.eta = Lam_weak @ v.mu  # Use the initialized mu as the mean of the weak prior
+        v.Sigma = 1/tiny_prior * np.diag([1.0, 1.0, 0.01])
 
     # ---------- Linearize all factors (mu is now in place) ----------
     for f in factors:
@@ -705,7 +706,6 @@ def build_super_graph(layers, eta_damping=0.2):
 
         fg.var_nodes.append(v)
 
-
     fg.n_var_nodes = len(fg.var_nodes)
 
     # ---------- Utility: assemble a group's linpoint (using base belief means) ----------
@@ -758,6 +758,7 @@ def build_super_graph(layers, eta_damping=0.2):
                 x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
 
                 Jloc = f.jac_fn(x_loc)
+                
                 # Map Jloc column blocks back to the super variable columns
                 row = np.zeros((Jloc.shape[0], ncols))
                 c0 = 0
@@ -838,6 +839,7 @@ def build_super_graph(layers, eta_damping=0.2):
                 row[:, right_start:right_start+dj] = Jloc[:, di:di+dj] 
 
                 Jrows.append(row)
+            
             return np.vstack(Jrows) 
 
         z_list = [f.measurement for f in cross]
@@ -877,11 +879,10 @@ def build_super_graph(layers, eta_damping=0.2):
     return fg
 
 
-
 def build_abs_graph(
     layers,
-    r_reduced = 3,
-    eta_damping=0):
+    r_reduced = 2,
+    eta_damping=0.2):
 
     abs_var_nodes = {}
     Bs = {}
@@ -1049,7 +1050,7 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
 
 
     # ---------- Create super VariableNodes ----------
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
+    fg = layers[-1]['graph']
 
     super_var_nodes = {}
     for i, sn in enumerate(super_nodes):
@@ -1101,7 +1102,7 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
         return x
 
     # ---------- 3) super prior (in-group unary + in-group binary) ----------
-    def make_super_prior_factor(sid, base_factors):
+    def make_super_prior_factor(sid, lin0, base_factors):
         group = super_groups[sid]
         idx_map = local_idx[sid]
         ncols = total_dofs[sid]
@@ -1113,19 +1114,6 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
             if all(vid in group for vid in vids):
                 in_group.append(f)
 
-        def meas_fn_super_prior(x_super, *args):
-            meas_fn = []
-            for f in in_group:
-                vids = [v.variableID for v in f.adj_var_nodes]
-                # Assemble this factor's local x
-                x_loc_list = []
-                for vid in vids:
-                    st, d = idx_map[vid]
-                    x_loc_list.append(x_super[st:st+d])
-                x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
-                meas_fn.append(f.meas_fn(x_loc))
-            return np.concatenate(meas_fn) if meas_fn else np.zeros(0)
-
         def jac_fn_super_prior(x_super, *args):
             Jrows = []
             for f in in_group:
@@ -1136,7 +1124,7 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
                 for vid in vids:
                     st, d = idx_map[vid]
                     dims.append(d)
-                    x_loc_list.append(x_super[st:st+d])
+                    x_loc_list.append(lin0[st:st+d])
                 x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
 
                 Jloc = f.jac_fn(x_loc)
@@ -1150,6 +1138,23 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
 
                 Jrows.append(row)
             return np.vstack(Jrows) if Jrows else np.zeros((0, ncols))
+
+        J = jac_fn_super_prior(x_super=lin0)
+        meas_fn = []
+        for f in in_group:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            # Build this factor's local x for (potentially) nonlinear Jacobian
+            x_loc_list = []
+            dims = []
+            for vid in vids:
+                st, d = idx_map[vid]
+                dims.append(d)
+                x_loc_list.append(lin0[st:st+d])
+            x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
+            meas_fn.append(f.meas_fn(x_loc))
+        meas_fn = np.concatenate(meas_fn) 
+        def meas_fn_super_prior(x_super, *args):
+            return meas_fn + J@(x_super-lin0)
 
         # z_super: concatenate each base factor's z
         z_list = [f.measurement for f in in_group]
@@ -1236,11 +1241,11 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
         u, v = e["data"]["source"], e["data"]["target"]
 
         if v == "prior":
-            meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, base_graph.factors)
+            lin0 = make_linpoint_for_group(u)
+            meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, lin0, base_graph.factors)
             f = Factor(len(fg.factors), [super_var_nodes[u]], z, z_lambda, meas_fn, jac_fn)
             f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
             f.type = "super_prior"
-            lin0 = make_linpoint_for_group(u)
             f.compute_factor(linpoint=lin0, update_self=True)
             fg.factors.append(f)
             super_var_nodes[u].adj_factors.append(f)
@@ -1255,7 +1260,6 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
             fg.factors.append(f)
             super_var_nodes[u].adj_factors.append(f)
             super_var_nodes[v].adj_factors.append(f)
-
 
     fg.n_factor_nodes = len(fg.factors)
     return fg
@@ -1389,7 +1393,7 @@ def top_down_modify_super_graph(layers):
         eta = sn.belief.lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, sn.belief.lam)
         sn.belief  = new_belief
-        #sn.prior = NdimGaussian(sn.dofs, 0.00000001*sn.mu, 0.00000001*np.eye(sn.dofs))
+        sn.prior = NdimGaussian(sn.dofs, 1e-10*eta, 1e-10*sn.belief.lam)
 
     # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
     # Idea: for the side of the super factor f_sup connected to variable sid:
@@ -1404,7 +1408,6 @@ def top_down_modify_super_graph(layers):
             f_sup.adj_beliefs[idx_side] = sn.belief
 
     return
-
 
 
 def refresh_gbp_results(layers):
@@ -1521,13 +1524,16 @@ class VGraph:
     def __init__(self,
                  layers,
                  nonlinear_factors=True,
-                 eta_damping=0.1,
+                 eta_damping=0.4,
                  beta=0.0,
+                 iters_since_relinear=0,
                  num_undamped_iters=0,
-                 min_linear_iters=5,
+                 min_linear_iters=10,
                  wild_thresh=0):
 
         self.layers = layers
+        self.iters_since_relinear = iters_since_relinear
+        self.min_linear_iters = min_linear_iters
         self.nonlinear_factors = nonlinear_factors
         self.eta_damping = eta_damping
         self.wild_thresh = wild_thresh
@@ -1557,15 +1563,20 @@ class VGraph:
 
             if name.startswith("super1"):
                 # Update super using the previous base graph's new linearization points
-                bottom_up_modify_super_graph(layers[:i+1])
+                if self.iters_since_relinear >= self.min_linear_iters:
+                    print("relinarizing super1 layer")
+                    layers[i]["graph"] = update_super_graph_linearized(layers[:i+1], eta_damping=self.eta_damping)
+                    self.iters_since_relinear = 0
+                else:
+                    self.iters_since_relinear += 1
 
             elif name.startswith("super"):
                 # Update super using the previous layer's graph
-                layers[i]["graph"] = build_super_graph(layers[:i+1])
+                layers[i]["graph"] = build_super_graph(layers[:i+1], eta_damping=self.eta_damping)
 
             elif name.startswith("abs"):
                 # Rebuild abs using the previous super
-                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1])
+                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], eta_damping=self.eta_damping)
                 layers[i]["graph"] = abs_graph
                 layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
@@ -1593,10 +1604,9 @@ class VGraph:
                 # Project abs.mu back to super
                 top_down_modify_super_graph(layers[:i+1])
 
-
         # ---- refresh gbp_result for UI ----
-        refresh_gbp_results(layers)
-
+        #refresh_gbp_results(layers)
+vg = VGraph(layers)
 
 # -----------------------
 # Layout
@@ -1662,7 +1672,7 @@ app.layout = html.Div([
             dcc.Input(id="grid-gy", type="number", value=2, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("K:", style={"marginRight":"6px"}),
-            dcc.Input(id="kmeans-k", type="number", value=128, min=1, step=1,
+            dcc.Input(id="kmeans-k", type="number", value=5, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("seed:", style={"marginRight":"6px"}),
             dcc.Input(id="rand-seed", type="number", value=2001, step=1,
@@ -1828,10 +1838,9 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
             # Ensure super graph has run at least once
             layers[-1]["graph"].synchronous_iteration() 
-            layers[-1]["graph"].synchronous_iteration()
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
-            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=2)
+            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=3)
         else:
             k_next = pair_idx + 1
             super_layer_idx = k_next*2 - 1
@@ -1841,11 +1850,12 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                 super_nodes, super_edges, node_map = fuse_to_super_kmeans(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
             else:
                 super_nodes, super_edges, node_map = fuse_to_super_order(last["nodes"], last["edges"], int(kk or 8), super_layer_idx, tail_heavy=True)
-            # Ensure super graph has run at least once
-            layers[-1]["graph"].synchronous_iteration() 
-            layers[-1]["graph"].synchronous_iteration()
+
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
-            layers[super_layer_idx]["graph"] = build_super_graph(layers)
+            if super_layer_idx == 1:
+                layers[super_layer_idx]["graph"] = update_super_graph_linearized(layers)
+            else:
+                layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
             pair_idx = k_next
 
@@ -2103,7 +2113,8 @@ def unified_solver(gbp_click, gbp_ticks,
         batch = max(1, min(snap_int, iters_total - iters_done))
 
         for _ in range(batch):
-            vloop(layers)
+            vg.layers = layers
+            vg.vloop()
 
         refresh_gbp_results(layers)
         latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]
