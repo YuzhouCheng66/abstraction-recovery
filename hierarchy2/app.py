@@ -1050,7 +1050,8 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
 
 
     # ---------- Create super VariableNodes ----------
-    fg = layers[-1]['graph']
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
+
 
     super_var_nodes = {}
     for i, sn in enumerate(super_nodes):
