@@ -271,10 +271,11 @@ def update_super_graph_linearized(layers, eta_damping=0.2):
 # -----------------------
 # SLAM-like base graph
 # -----------------------
-def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
-    if rng is None :
+def make_slam_like_graph(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, seed=None):
+    if seed is None :
         rng = np.random.default_rng()  # ✅ Ensure we have an RNG
-
+    else:
+        rng = np.random.default_rng(seed)
     nodes, edges = [], []
     positions = []
     x, y = 0.0, 0.0
@@ -614,13 +615,16 @@ def highest_pair_idx(names):
 # -----------------------
 # Initialization & Boundary
 # -----------------------
-def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
-    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, rng)
+def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, seed=None):
+    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, seed)
     return [{"name": "base", "nodes": base_nodes, "edges": base_edges}]
 
 VIEW_W, VIEW_H = 960, 600
 ASPECT = VIEW_W / VIEW_H
 AXIS_PAD=20.0
+# ==== Blobal Status ====
+layers = init_layers()
+
 
 def adjust_bounds_to_aspect(xmin, xmax, ymin, ymax, aspect):
     cx=(xmin+xmax)/2; cy=(ymin+ymax)/2
@@ -658,8 +662,8 @@ def build_noisy_pose_graph(
     edges,
     prior_sigma: float = 10,
     odom_sigma: float = 10,
-    tiny_prior: float = 1e-10,
-    rng=None,
+    tiny_prior: float = 1e-12,
+    seed=None,
 ):
     
     """
@@ -682,8 +686,10 @@ def build_noisy_pose_graph(
     prior_noises = {}
     odom_noises = {}
 
-    if rng is None:
+    if seed is None:
         rng = np.random.default_rng()
+    else:
+        rng = np.random.default_rng(seed)
 
     # Generate noise for all edges
     for e in edges:
@@ -847,8 +853,8 @@ def build_super_graph(layers, eta_damping=0.2):
         v.mu = mu_super
         v.Sigma = Sigma_super
         v.belief = NdimGaussian(dofs, eta, lam)
-        v.prior.lam = 1e-10 * lam
-        v.prior.eta = 1e-10 * eta
+        v.prior.lam = 1e-12 * lam
+        v.prior.eta = 1e-12 * eta
 
         fg.var_nodes.append(v)
 
@@ -1519,17 +1525,37 @@ def vloop(layers):
 
 
 
+def compute_energy(layers):
+    """
+    energy = sum_i || mu_i - GT_i ||_1  over base layer variables
+    """
+    try:
+        base_graph = layers[0].get("graph", None)
+        if base_graph is None or not getattr(base_graph, "var_nodes", None):
+            return "energy: -"
+        total = 0.0
+        for v in base_graph.var_nodes:
+            total += float(np.linalg.norm(v.mu - v.gt))
+        return f"energy: {total:.4f}"
+    except Exception:
+        return "energy: -"
+    
+
+
 class VGraph:
     def __init__(self,
                  layers,
                  nonlinear_factors=True,
-                 eta_damping=0.2,
+                 eta_damping=0.4,
                  beta=0.0,
+                 iters_since_relinear=0,
                  num_undamped_iters=0,
-                 min_linear_iters=5,
+                 min_linear_iters=100,
                  wild_thresh=0):
 
         self.layers = layers
+        self.iters_since_relinear = iters_since_relinear
+        self.min_linear_iters = min_linear_iters
         self.nonlinear_factors = nonlinear_factors
         self.eta_damping = eta_damping
         self.wild_thresh = wild_thresh
@@ -1559,8 +1585,12 @@ class VGraph:
 
             if name.startswith("super1"):
                 # Update super using the previous base graph's new linearization points
-                #bottom_up_modify_super_graph(layers[:i+1])
-                pass
+                if self.iters_since_relinear >= self.min_linear_iters:
+                    print("relinarizing super1 layer")
+                    layers[i]["graph"] = update_super_graph_linearized(layers[:i+1], eta_damping=self.eta_damping)
+                    self.iters_since_relinear = 0
+                else:
+                    self.iters_since_relinear += 1
 
             elif name.startswith("super"):
                 # Update super using the previous layer's graph
@@ -1596,9 +1626,11 @@ class VGraph:
                 # Project abs.mu back to super
                 top_down_modify_super_graph(layers[:i+1])
 
-
         # ---- refresh gbp_result for UI ----
         #refresh_gbp_results(layers)
+        return layers
+vg = VGraph(layers)
+
 
 # -----------------------
 # Layout
@@ -1721,6 +1753,8 @@ app.layout = html.Div([
                     style={"margin":"0 0 0 16px", "fontStyle":"italic", "color":"#444", "whiteSpace":"nowrap"}),
             html.Div(id="vcycle-status",
                     style={"margin":"0 0 0 12px", "fontStyle":"italic", "color":"#444", "whiteSpace":"nowrap"}),
+            html.Div(id="energy-status",
+                    style={"margin":"0 0 0 12px", "fontStyle":"italic", "color":"#444", "whiteSpace":"nowrap"}),
         ], style={
             "display":"flex",
             "alignItems":"center",
@@ -1795,23 +1829,22 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
     if triggered == "new-graph":
-        if seed is None or seed == 0:
-            rng = np.random.default_rng()        # Random initialization
-        else:
-            rng = np.random.default_rng(seed)    # Fixed seed
+        if seed == 0 or seed is None:
+            seed = np.random.randint(0,2**32)        # Random initialization
+
         N = int(pN or 100)
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
         radius = float(pRadius or 50)
         prior_prop=float(pPriorProp or 0.00)
-        layers = init_layers(N, step, prob, radius, prior_prop, rng=rng)
+        layers = init_layers(N, step, prob, radius, prior_prop, seed)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
         # Build the GBP graph (rendering still shows GT at this point)
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
-                                           odom_sigma=float(pOdom or 1.0)
-                                           )
+                                           odom_sigma=float(pOdom or 1.0),
+                                           seed = seed)
         layers[0]["graph"] = gbp_graph
         opts=[{"label":"base","value":"base"}]
         return opts, "base"
@@ -1847,7 +1880,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             if super_layer_idx > 1:
                 layers[super_layer_idx]["graph"] = build_super_graph(layers)
             else:
-                layers[super_layer_idx]["graph"] = update_super_graph_linearized(layers)
+                layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
             pair_idx = k_next
 
@@ -1870,6 +1903,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 )
 def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
     # Find the current layer
+    global layers
     layer = next((l for l in layers if l["name"] == layer_name), None)
     if layer is None:
         return [], [], {"name": "preset"}
@@ -1959,7 +1993,6 @@ def update_layer(layer_name, _options, gbp_poses, show_number, param_N):
 
 
 
-
 # -----------------------
 # Merged GBP callback (button + interval + new-graph emergency stop)
 # -----------------------
@@ -1995,6 +2028,7 @@ def unified_solver(gbp_click, gbp_ticks,
                    gbp_state, vcycle_state,
                    iters, snap_int, current_layer):
 
+    global layers, vg
     ctx = dash.callback_context
     if not ctx.triggered:
         return no_update, no_update, gbp_state, True, no_update, \
@@ -2104,9 +2138,9 @@ def unified_solver(gbp_click, gbp_ticks,
         snap_int = vcycle_state["snap_int"]
         batch = max(1, min(snap_int, iters_total - iters_done))
 
-        vg = VGraph(layers=layers)
         for _ in range(batch):
-            vg.vloop()
+            vg.layers = layers
+            layers = vg.vloop()
 
         refresh_gbp_results(layers)
         latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]

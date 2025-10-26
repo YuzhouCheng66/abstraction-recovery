@@ -16,11 +16,12 @@ app.title = "Factor Graph SVD Abs&Recovery"
 # SLAM-like base graph
 # -----------------------
 def make_slam_like_graph(
-    N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None
+    N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, seed=None
 ):
-    if rng is None:
+    if seed is None:
         rng = np.random.default_rng()
-
+    else:
+        rng = np.random.default_rng(seed)
     # --- helpers ---
     def wrap_angle(a):
         # (-pi, pi]
@@ -383,8 +384,8 @@ def highest_pair_idx(names):
 # -----------------------
 # Initialization & Boundary
 # -----------------------
-def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
-    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, rng)
+def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, seed=None):
+    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, seed)
     return [{"name": "base", "nodes": base_nodes, "edges": base_edges}]
 
 VIEW_W, VIEW_H = 960, 600
@@ -428,15 +429,17 @@ def build_noisy_pose_graph(
     prior_sigma: float | tuple | np.ndarray = 1.0,   # A scalar expands to [s, s, s*THETA_RATIO]
     odom_sigma:  float | tuple | np.ndarray = 1.0,   # Same as above
     tiny_prior: float = 1e-10,
-    rng=None,
+    seed=None,
 ):
     """
     Build an SE(2) 2D pose graph (x, y, theta). Binary edges use the SE(2) between nonlinear measurement model.
     Initialization policy: first propagate mu sequentially (reset when encountering a prior), then linearize all factors.
     """
 
-    if rng is None:
+    if seed is None:
         rng = np.random.default_rng()
+    else:
+        rng = np.random.default_rng(seed)
 
     THETA_RATIO = 0.01  # A scalar expands to [s, s, s*0.01]
 
@@ -475,7 +478,7 @@ def build_noisy_pose_graph(
         return np.array([xj, yj, thj], dtype=float)
 
     # ---------- Graph & variables ----------
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    fg = FactorGraph(nonlinear_factors=True, eta_damping=0)
 
     var_nodes = []
     for i, n in enumerate(nodes):
@@ -1529,7 +1532,7 @@ class VGraph:
                  beta=0.0,
                  iters_since_relinear=0,
                  num_undamped_iters=0,
-                 min_linear_iters=10,
+                 min_linear_iters=50,
                  wild_thresh=0):
 
         self.layers = layers
@@ -1607,6 +1610,7 @@ class VGraph:
 
         # ---- refresh gbp_result for UI ----
         #refresh_gbp_results(layers)
+        return layers
 vg = VGraph(layers)
 
 # -----------------------
@@ -1799,28 +1803,28 @@ app.layout = html.Div([
 )
 def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                   pN, pStep, pProb, pRadius, pPrior, pOdom, pPriorProp, seed):
-    global layers, pair_idx, gbp_graph
+    global layers, pair_idx, gbp_graph, vg
     ctx = dash.callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
     if triggered == "new-graph":
-        if seed is None or seed == 0:
-            rng = np.random.default_rng()        # Random initialization
-        else:
-            rng = np.random.default_rng(seed)    # Fixed seed
+        if seed == 0 or seed is None:
+            seed = np.random.randint(0,2**32)        # Random initialization
+
         N = int(pN or 100)
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
         radius = float(pRadius or 50)
         prior_prop=float(pPriorProp or 0.00)
-        layers = init_layers(N, step, prob, radius, prior_prop, rng=rng)
+        layers = init_layers(N, step, prob, radius, prior_prop, seed)
+        vg = VGraph(layers)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
         # Build the GBP graph (rendering still shows GT at this point)
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
                                            odom_sigma=float(pOdom or 1.0),
-                                           rng=rng)
+                                           seed=seed)
         layers[0]["graph"] = gbp_graph
         opts=[{"label":"base","value":"base"}]
         return opts, "base"
@@ -1854,7 +1858,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
             if super_layer_idx == 1:
-                layers[super_layer_idx]["graph"] = update_super_graph_linearized(layers)
+                layers[super_layer_idx]["graph"] = build_super_graph(layers)
             else:
                 layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
@@ -2004,6 +2008,7 @@ def unified_solver(gbp_click, gbp_ticks,
                    gbp_state, vcycle_state,
                    iters, snap_int, current_layer):
 
+    global layers, vg
     ctx = dash.callback_context
     if not ctx.triggered:
         return no_update, no_update, gbp_state, True, no_update, \
@@ -2115,7 +2120,7 @@ def unified_solver(gbp_click, gbp_ticks,
 
         for _ in range(batch):
             vg.layers = layers
-            vg.vloop()
+            vg.layers = vg.vloop()
 
         refresh_gbp_results(layers)
         latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]

@@ -18,7 +18,7 @@ class FactorGraph:
                  eta_damping=0.2,
                  beta=0.0,
                  num_undamped_iters=0,
-                 min_linear_iters=50,
+                 min_linear_iters=200,
                  wild_thresh=0):
 
         self.var_nodes = []
