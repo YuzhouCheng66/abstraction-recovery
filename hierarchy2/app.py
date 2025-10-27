@@ -428,6 +428,7 @@ def build_noisy_pose_graph(
     edges,
     prior_sigma: float | tuple | np.ndarray = 1.0,   # A scalar expands to [s, s, s*THETA_RATIO]
     odom_sigma:  float | tuple | np.ndarray = 1.0,   # Same as above
+    loop_sigma:  float | tuple | np.ndarray = 1.0,   # Same as above
     tiny_prior: float = 1e-10,
     seed=None,
 ):
@@ -533,9 +534,11 @@ def build_noisy_pose_graph(
     # ---------- Information matrices ----------
     prior_sigma_vec = _sigma_vec(prior_sigma)
     odom_sigma_vec  = _sigma_vec(odom_sigma)
+    loop_sigma_vec  = _sigma_vec(loop_sigma)
 
     Lambda_prior = np.diag(1.0 / (prior_sigma_vec**2))
     Lambda_odom  = np.diag(1.0 / (odom_sigma_vec**2))
+    Lambda_loop  = np.diag(1.0 / (loop_sigma_vec**2))
 
     # ---------- Factors; first create noisy measurements (no linearization yet) ----------
     odom_meas = {}   # (i,j) -> z_noisy
@@ -561,24 +564,34 @@ def build_noisy_pose_graph(
         if dst != "prior":
             i, j = int(src), int(dst)
 
-            # Raw z (use existing if provided; otherwise derive from GT)
+            # Ground-truth relative pose
             if "z" in e["data"]:
                 z = np.array(e["data"]["z"], dtype=float).ravel()
             else:
                 z = relpose_SE2(var_nodes[i].GT, var_nodes[j].GT)
 
-            # Add noise
-            noise = rng.normal(0.0, odom_sigma_vec, size=3)
+            kind = e["data"].get("kind", "between")
+
+            # >>> CHANGED: choose noise model per kind
+            if kind == "loop":
+                noise_vec = rng.normal(0.0, loop_sigma_vec, size=3)
+                this_Lambda = Lambda_loop
+            else:
+                # default treat as odom
+                noise_vec = rng.normal(0.0, odom_sigma_vec, size=3)
+                this_Lambda = Lambda_odom
+
             z_noisy = z.copy()
-            z_noisy[:2] += noise[:2]
-            z_noisy[2]  = wrap_angle(z_noisy[2] + noise[2])
+            z_noisy[:2] += noise_vec[:2]
+            z_noisy[2]  = wrap_angle(z_noisy[2] + noise_vec[2])
 
-            odom_meas[(i, j)] = z_noisy
+            # only store sequential odom for init mu forward-prop
+            if kind == "odom" and (j == i + 1):
+                odom_meas[(i, j)] = z_noisy
 
-            # Create factor, but do not compute_factor yet
             vi, vj = var_nodes[i], var_nodes[j]
-            f = Factor(fid, [vi, vj], z_noisy, Lambda_odom, meas_fn_se2_between, jac_fn_se2_between)
-            f.type = e["data"].get("kind", "between")
+            f = Factor(fid, [vi, vj], z_noisy, this_Lambda, meas_fn_se2_between, jac_fn_se2_between)
+            f.type = kind
             factors.append(f)
             vi.adj_factors.append(f)
             vj.adj_factors.append(f)
@@ -1694,11 +1707,15 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Span("prior σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-noise", type="number", value=1.0, step=0.01,
+            dcc.Input(id="prior-noise", type="number", value=1.0, step=0.001,
                     style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("odom σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.01,
+            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.001,
+                    style={"width":"100px", "marginRight":"12px"}),
+
+            html.Span("loop σ:", style={"marginRight":"6px"}),
+            dcc.Input(id="loop-noise", type="number", value=1.0, step=0.001,
                     style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("iters:", style={"marginRight":"6px"}),
@@ -1796,13 +1813,14 @@ app.layout = html.Div([
     State("param-radius","value"),
     State("prior-noise","value"),
     State("odom-noise","value"),
+    State("loop-noise", "value"),
     State("prior-prop","value"),
     State("rand-seed","value"),
 
     prevent_initial_call=True
 )
 def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
-                  pN, pStep, pProb, pRadius, pPrior, pOdom, pPriorProp, seed):
+                  pN, pStep, pProb, pRadius, pPrior, pOdom, pLoop, pPriorProp, seed):
     global layers, pair_idx, gbp_graph, vg
     ctx = dash.callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
@@ -1824,6 +1842,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
                                            odom_sigma=float(pOdom or 1.0),
+                                           loop_sigma=float(pLoop or 1.0),
                                            seed=seed)
         layers[0]["graph"] = gbp_graph
         opts=[{"label":"base","value":"base"}]

@@ -4,6 +4,7 @@ from dash import html, dcc, Input, Output, State, no_update
 import dash_cytoscape as cyto
 import numpy as np
 from scipy.linalg import block_diag
+from collections import defaultdict
 
 # ==== GBP import ====
 from gbp.gbp import *
@@ -14,76 +15,87 @@ app.title = "Factor Graph SVD Abs&Recovery"
 # -----------------------
 # SLAM-like base graph
 # -----------------------
-def make_slam_like_graph(N=100, grid_step=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
-    import numpy as np
-    import math
-
-    """
-    Generate a regular grid graph as close as possible to sqrt(N) × sqrt(N).
-    - Nodes are placed (row-major) at the first N cells of an m×m grid from top-left to bottom-right;
-    - Add between factors between 4-neighbors (up/down/left/right); to avoid duplicates, connect only rightward and downward edges;
-    - Priors: sample strong_ids according to prior_prop and connect them to a virtual 'prior' factor.
-    """
-    if rng is None:
+def make_slam_like_graph(
+    N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, seed=None
+):
+    if seed is None:
         rng = np.random.default_rng()
+    else:
+        rng = np.random.default_rng(seed)
+    # --- helpers ---
+    def wrap_angle(a):
+        # (-pi, pi]
+        return np.arctan2(np.sin(a), np.cos(a))
 
-    # Grid size: m×m, where m = ceil(sqrt(N))
-    m = int(math.ceil(math.sqrt(int(N))))
+    def relpose_SE2(pose_i, pose_j):
+        """ Return z_ij = [dx_local, dy_local, dtheta] where 'local' is frame of i """
+        xi, yi, thi = pose_i
+        xj, yj, thj = pose_j
+        Ri = np.array([[np.cos(thi), -np.sin(thi)],
+                       [np.sin(thi),  np.cos(thi)]])
+        dp = np.array([xj - xi, yj - yi])
+        trans_local = Ri.T @ dp
+        dth = wrap_angle(thj - thi)
+        return np.array([trans_local[0], trans_local[1], dth], dtype=float)
 
-    nodes, edges = [], []
+    # --- SE(2) trajectory (smooth heading) ---
+    poses = []
+    x, y, th = 0.0, 0.0, 0.0
+    poses.append((x, y, th))
 
-    # ---- 1) Create nodes (first N cells, row-major) ----
-    # Top-left is (0, 0); x increases to the right, y increases downward; cell spacing = grid_step
-    for idx in range(int(N)):
-        r = idx // m     # row
-        c = idx % m      # col
-        x = float(c * grid_step)
-        y = float(r * grid_step)
+    TURN_STD = 1  # rad, per step (tune smaller/larger as needed)
+    for _ in range(1, int(N)):
+        dth = rng.normal(0.0, TURN_STD)
+        th = wrap_angle(th + dth)
+        x += float(step_size) * np.cos(th)
+        y += float(step_size) * np.sin(th)
+        poses.append((x, y, th))
+
+    # --- nodes (dim:3); visualization uses x,y ---
+    nodes = []
+    for i, (px, py, pth) in enumerate(poses):
         nodes.append({
-            "data": {"id": f"{idx}", "layer": 0, "dim": 2, "num_base": 1},
-            "position": {"x": x, "y": y}
+            "data": {"id": f"{i}", "layer": 0, "dim": 3, "theta": float(pth), "num_base": 1},
+            "position": {"x": float(px), "y": float(py)}  # for plotting only
         })
 
-    # ---- 2) 4-neighbor edges (connect only right and down to avoid duplicates) ----
-    def in_bounds(id_):
-        return 0 <= id_ < int(N)
+    # --- sequential odometry edges; attach measurement z_ij (local frame) ---
+    edges = []
+    for i in range(int(N) - 1):
+        z_ij = relpose_SE2(poses[i], poses[i+1])
+        edges.append({
+            "data": {"source": f"{i}", "target": f"{i+1}", "kind": "odom", "z": z_ij.tolist()}
+        })
 
-    for idx in range(int(N)):
-        r = idx // m
-        c = idx % m
+    # --- loop-closure edges (proximity-triggered); also attach SE(2) measurements ---
+    for i in range(int(N)):
+        xi, yi, _ = poses[i]
+        for j in range(i + 5, int(N)):  # consider loop closures only when gap >= 5 steps
+            if rng.random() < float(loop_prob):
+                xj, yj, _ = poses[j]
+                if np.hypot(xi - xj, yi - yj) < float(loop_radius):
+                    z_ij = relpose_SE2(poses[i], poses[j])
+                    edges.append({
+                        "data": {"source": f"{i}", "target": f"{j}", "kind": "loop", "z": z_ij.tolist()}
+                    })
 
-        # Right neighbor (same row, col + 1)
-        if c + 1 < m:
-            right_id = idx + 1
-            if in_bounds(right_id):
-                edges.append({"data": {"source": f"{idx}", "target": f"{right_id}"}})
-
-        # Down neighbor (next row, same column)
-        if r + 1 < m:
-            down_id = idx + m
-            if in_bounds(down_id):
-                edges.append({"data": {"source": f"{idx}", "target": f"{down_id}"}})
-
-    # ---- 3) Prior sampling logic (identical to original implementation) ----
+    # --- strong priors (anchors, etc.); still connect to the virtual "prior" ---
     if prior_prop <= 0.0:
         strong_ids = {0}
     elif prior_prop >= 1.0:
-        strong_ids = set(range(int(N)))
+        strong_ids = set(range(N))
     else:
-        k = max(1, int(np.floor(prior_prop * int(N))))
-        strong_ids = set(rng.choice(int(N), size=k, replace=False).tolist())
+        k = max(1, int(np.floor(prior_prop * N)))
+        strong_ids = set(rng.choice(N, size=k, replace=False).tolist())
 
-    # Connect priors (virtual factor 'prior')
     for i in strong_ids:
-        edges.append({"data": {"source": f"{i}", "target": "prior"}})
+        edges.append({"data": {"source": f"{i}", "target": "prior", "kind": "prior"}})
 
     return nodes, edges
 
 
-
-
 # -----------------------
-# Grid 聚合
+# Grid aggregation
 # -----------------------
 def fuse_to_super_grid(prev_nodes, prev_edges, gx, gy, layer_idx):
     positions = np.array([[n["position"]["x"], n["position"]["y"]] for n in prev_nodes], dtype=float)
@@ -286,10 +298,10 @@ def fuse_to_super_order(prev_nodes, prev_edges, k, layer_idx, tail_heavy=True):
     # Group sizes
     base = n // k
     rem  = n %  k
-    if tail_heavy:
-        sizes = [base]*(k-1) + [base+rem]     # Tail absorbs remainder: ..., last += rem
+    if rem > 0:
+        sizes = [k]*(base) + [rem]     # Tail absorbs remainder: ..., last += rem
     else:
-        sizes = [base+1]*rem + [base]*(k-rem) # Evenly distribute remainder (optional)
+        sizes = [k]*(base)
 
     # Build groups: record indices per group
     groups = []
@@ -372,8 +384,8 @@ def highest_pair_idx(names):
 # -----------------------
 # Initialization & Boundary
 # -----------------------
-def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, rng=None):
-    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, rng)
+def init_layers(N=100, step_size=25, loop_prob=0.05, loop_radius=50, prior_prop=0.0, seed=None):
+    base_nodes, base_edges = make_slam_like_graph(N, step_size, loop_prob, loop_radius, prior_prop, seed)
     return [{"name": "base", "nodes": base_nodes, "edges": base_edges}]
 
 VIEW_W, VIEW_H = 960, 600
@@ -414,128 +426,215 @@ gbp_graph = None
 def build_noisy_pose_graph(
     nodes,
     edges,
-    prior_sigma: float = 10,
-    odom_sigma: float = 10,
+    prior_sigma: float | tuple | np.ndarray = 1.0,   # A scalar expands to [s, s, s*THETA_RATIO]
+    odom_sigma:  float | tuple | np.ndarray = 1.0,   # Same as above
     tiny_prior: float = 1e-10,
-    rng=None,
+    seed=None,
 ):
-    
     """
-    Construct a 2D pose-only factor graph (linear, Gaussian) and inject noise.
-    Parameters:
-      prior_sigma : standard deviation of the strong prior (smaller = stronger)
-      odom_sigma  : standard deviation of odometry measurement noise
-      prior_prop  : 0.0 = anchor only; (0,1) = randomly select by proportion; >=1.0 = all
-      tiny_prior  : a tiny prior added to all nodes to prevent singularity
-      seed        : random seed (for reproducibility)
+    Build an SE(2) 2D pose graph (x, y, theta). Binary edges use the SE(2) between nonlinear measurement model.
+    Initialization policy: first propagate mu sequentially (reset when encountering a prior), then linearize all factors.
     """
 
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    if seed is None:
+        rng = np.random.default_rng()
+    else:
+        rng = np.random.default_rng(seed)
+
+    THETA_RATIO = 0.01  # A scalar expands to [s, s, s*0.01]
+
+    def _sigma_vec(s):
+        v = np.array(s, dtype=float).ravel()
+        if v.size == 1:
+            s = float(v.item())
+            return np.array([s, s, s * THETA_RATIO], dtype=float)
+        assert v.size == 3, "If sigma is not scalar, it must be length-3 (x,y,theta)."
+        return v
+
+    def wrap_angle(a):
+        return np.arctan2(np.sin(a), np.cos(a))
+
+    def relpose_SE2(pose_i, pose_j):
+        """z_ij = [dx_local, dy_local, dtheta], defined in i's coordinate frame."""
+        xi, yi, thi = pose_i
+        xj, yj, thj = pose_j
+        c, s = np.cos(thi), np.sin(thi)
+        RT = np.array([[ c, s],
+                       [-s, c]])    # R(thi)^T
+        dp = np.array([xj - xi, yj - yi])
+        trans_local = RT @ dp
+        dth = wrap_angle(thj - thi)
+        return np.array([trans_local[0], trans_local[1], dth], dtype=float)
+
+    def compose_SE2(pose_i, z_ij):
+        """Given local measurement z_ij, propagate from pose_i to pose_j."""
+        xi, yi, thi = pose_i
+        dx, dy, dth = z_ij
+        c, s = np.cos(thi), np.sin(thi)
+        t_global = np.array([c*dx - s*dy, s*dx + c*dy])
+        xj = xi + t_global[0]
+        yj = yi + t_global[1]
+        thj = wrap_angle(thi + dth)
+        return np.array([xj, yj, thj], dtype=float)
+
+    # ---------- Graph & variables ----------
+    fg = FactorGraph(nonlinear_factors=True, eta_damping=0)
 
     var_nodes = []
-    I2 = np.eye(2, dtype=float)
-    N = len(nodes)
-
-    # ---- Pre-generate noise ----
-    prior_noises = {}
-    odom_noises = {}
-
-    if rng is None:
-        rng = np.random.default_rng()
-
-    # Generate noise for all edges
-    for e in edges:
-        src = e["data"]["source"]; dst = e["data"]["target"]
-        # Binary edge
-        if dst != "prior":
-            odom_noises[(int(src[:]), int(dst[:]))] = rng.normal(0.0, odom_sigma, size=2)
-        # Unary edge (strong prior)
-        elif dst == "prior":
-            prior_noises[int(src[:])] = rng.normal(0.0, prior_sigma, size=2)
-
-
-    # ---- variable nodes ----
     for i, n in enumerate(nodes):
-        v = VariableNode(i, dofs=2)
-        v.GT = np.array([n["position"]["x"], n["position"]["y"]], dtype=float)
-
-        # Tiny prior
-        v.prior.lam = tiny_prior * I2
-        v.prior.eta = np.zeros(2, dtype=float)
-
+        v = VariableNode(i, dofs=3)
+        th = float(n["data"].get("theta", 0.0))  # Written by make_slam_like_graph (radians)
+        v.GT = np.array([n["position"]["x"], n["position"]["y"], th], dtype=float)
+        # Initialize mu to zero; will be set by sequential measurements later
+        v.mu = np.zeros(3, dtype=float)
         var_nodes.append(v)
 
     fg.var_nodes = var_nodes
     fg.n_var_nodes = len(var_nodes)
 
+    # ---------- Measurement model (SE(2) between) ----------
+    def meas_fn_se2_between(xij, *args):
+        # xij = [xi, yi, thi, xj, yj, thj]
+        xi, yi, thi, xj, yj, thj = xij
+        c, s = np.cos(thi), np.sin(thi)
+        RT = np.array([[ c, s],
+                       [-s, c]])
+        dp = np.array([xj - xi, yj - yi])
+        r  = RT @ dp
+        dth = wrap_angle(thj - thi)
+        return np.array([r[0], r[1], dth], dtype=float)
+    
+    def jac_fn_se2_between(xij, *args):
+        # J: 3x6 w.r.t [xi,yi,thi,xj,yj,thj]
+        xi, yi, thi, xj, yj, thj = xij
+        c, s = np.cos(thi), np.sin(thi)
+        RT = np.array([[ c, s],
+                    [-s, c]])
+        dp = np.array([xj - xi, yj - yi])
+        r  = RT @ dp                    # [rx, ry]
+        dr_dthi = np.array([ r[1], -r[0] ])  
+        J = np.zeros((3, 6), dtype=float)
+        # wrt i
+        J[0:2, 0:2] = -RT
+        J[0:2, 2]   = dr_dthi
+        # wrt j
+        J[0:2, 3:5] = RT
+        # angle row
+        J[2, 2] = -1.0
+        J[2, 5] =  1.0
+        return J
 
-    # ---- prior factors ----
     def meas_fn_unary(x, *args):
         return x
+
     def jac_fn_unary(x, *args):
-        return np.eye(2)
-    # ---- odometry factors ----
-    def meas_fn(xy, *args):
-        return xy[2:] - xy[:2]
-    def jac_fn(xy, *args):
-        return np.array([[-1, 0, 1, 0],
-                         [ 0,-1, 0, 1]], dtype=float)
-    
+        return np.eye(3, dtype=float)
+
+    # ---------- Information matrices ----------
+    prior_sigma_vec = _sigma_vec(prior_sigma)
+    odom_sigma_vec  = _sigma_vec(odom_sigma)
+
+    Lambda_prior = np.diag(1.0 / (prior_sigma_vec**2))
+    Lambda_odom  = np.diag(1.0 / (odom_sigma_vec**2))
+
+    # ---------- Factors; first create noisy measurements (no linearization yet) ----------
+    odom_meas = {}   # (i,j) -> z_noisy
+    prior_meas = {}  # i -> z_noisy (unary)
     factors = []
     fid = 0
 
+    # Strong anchor: fix global reference (optionally anchor only x,y by relaxing Lambda_anchor[2,2])
+    v0 = var_nodes[0]
+    z_anchor = v0.GT.copy()
+    Lambda_anchor = np.diag(1.0 / (np.array([1e-3, 1e-3, 1e-5])**2))
+    f0 = Factor(fid, [v0], z_anchor, Lambda_anchor, meas_fn_unary, jac_fn_unary)
+    f0.type = "prior"
+    f0.compute_factor(linpoint=z_anchor, update_self=True)
+    factors.append(f0)
+    v0.adj_factors.append(f0)
+    fid += 1
+
     for e in edges:
-        src = e["data"]["source"]; dst = e["data"]["target"]
+        src = e["data"]["source"]
+        dst = e["data"]["target"]
+
         if dst != "prior":
-            i, j = int(src[:]), int(dst[:])
+            i, j = int(src), int(dst)
+
+            # Raw z (use existing if provided; otherwise derive from GT)
+            if "z" in e["data"]:
+                z = np.array(e["data"]["z"], dtype=float).ravel()
+            else:
+                z = relpose_SE2(var_nodes[i].GT, var_nodes[j].GT)
+
+            # Add noise
+            noise = rng.normal(0.0, odom_sigma_vec, size=3)
+            z_noisy = z.copy()
+            z_noisy[:2] += noise[:2]
+            z_noisy[2]  = wrap_angle(z_noisy[2] + noise[2])
+
+            odom_meas[(i, j)] = z_noisy
+
+            # Create factor, but do not compute_factor yet
             vi, vj = var_nodes[i], var_nodes[j]
-
-            meas = (vj.GT - vi.GT) + odom_noises[(i, j)]
-
-            meas_lambda = np.eye(len(meas))/ (odom_sigma**2)
-            f = Factor(fid, [vi, vj], meas, meas_lambda, meas_fn, jac_fn)
-            f.type = "base"
-            linpoint = np.r_[vi.GT, vj.GT]
-            f.compute_factor(linpoint=linpoint, update_self=True)
-
+            f = Factor(fid, [vi, vj], z_noisy, Lambda_odom, meas_fn_se2_between, jac_fn_se2_between)
+            f.type = e["data"].get("kind", "between")
             factors.append(f)
             vi.adj_factors.append(f)
             vj.adj_factors.append(f)
             fid += 1
 
         else:
-            i = int(src[:])
+            # Prior edge: create a noisy measurement for this variable
+            i = int(src)
+            z = var_nodes[i].GT.copy()
+            noise = rng.normal(0.0, prior_sigma_vec, size=3)
+            z[:2] += noise[:2]
+            z[2]   = wrap_angle(z[2] + noise[2])
+            prior_meas[i] = z
+
             vi = var_nodes[i]
-            z = vi.GT + prior_noises[i]
-
-            z_lambda = np.eye(len(meas))/ (prior_sigma**2)
-            f = Factor(fid, [vi], z, z_lambda, meas_fn_unary, jac_fn_unary)
+            f = Factor(fid, [vi], z, Lambda_prior, meas_fn_unary, jac_fn_unary)
             f.type = "prior"
-            f.compute_factor(linpoint=z, update_self=True)
-
             factors.append(f)
             vi.adj_factors.append(f)
             fid += 1
 
-        # anchor for initial position
-        v0 = var_nodes[0]
-        z = v0.GT
+    # ---------- Sequentially initialize mu: forward propagation from node 0; reset when hitting a prior ----------
+    N = len(var_nodes)
+    # Start: use GT
+    var_nodes[0].mu = var_nodes[0].GT
 
-        z_lambda = np.eye(len(meas))/ ((1e-3)**2)
-        f = Factor(fid, [v0], z, z_lambda, meas_fn_unary, jac_fn_unary)
-        f.type = "prior"
-        f.compute_factor(linpoint=z, update_self=True)
+    for i in range(N - 1):
+        # First propagate via odometry
+        if (i, i+1) in odom_meas:
+            var_nodes[i+1].mu = compose_SE2(var_nodes[i].mu, odom_meas[(i, i+1)])
+        else:
+            # If the edge is missing, fall back to GT
+            var_nodes[i+1].mu = var_nodes[i+1].GT.copy()
 
-        factors.append(f)
-        v0.adj_factors.append(f)
-        fid += 1
+        # If i+1 has a prior, override with the prior (replace the propagated value)
+        if (i + 1) in prior_meas:
+            var_nodes[i+1].mu = prior_meas[i + 1].copy()
+
+    # ---------- Add a very weak prior to each variable to avoid singularities ----------
+    Lam_weak = tiny_prior * np.diag([1.0, 1.0, 100.0])  # Make the angle dimension slightly “stiffer” to prevent drift
+    for v in var_nodes:
+        v.prior.lam = Lam_weak
+        v.prior.eta = Lam_weak @ v.mu  # Use the initialized mu as the mean of the weak prior
+        v.Sigma = 1/tiny_prior * np.diag([1.0, 1.0, 0.01])
+
+    # ---------- Linearize all factors (mu is now in place) ----------
+    for f in factors:
+        lin = np.concatenate([vn.mu for vn in f.adj_var_nodes]) if f.adj_var_nodes else np.array([])
+        f.compute_factor(linpoint=lin, update_self=True)
 
     fg.factors = factors
     fg.n_factor_nodes = len(factors)
     return fg
 
 
-def build_super_graph(layers):
+def build_super_graph(layers, eta_damping=0.2):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -572,7 +671,7 @@ def build_super_graph(layers):
 
 
     # ---------- Create super VariableNodes ----------
-    fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
 
     super_var_nodes = {}
     for i, sn in enumerate(super_nodes):
@@ -580,37 +679,35 @@ def build_super_graph(layers):
         dofs = total_dofs.get(sid, 0)
 
         v = VariableNode(i, dofs=dofs)
-
-        # === Stack base GT ===
         gt_vec = np.zeros(dofs)
+        mu_blocks = []
+        Sigma_blocks = []
         for bid, (st, d) in local_idx[sid].items():
+            # === Stack base GT ===
             gt_base = getattr(id2var[bid], "GT", None)
             if gt_base is None or len(gt_base) != d:
                 gt_base = np.zeros(d)
             gt_vec[st:st+d] = gt_base
-        v.GT = gt_vec
-        v.prior.lam = 1e-10 * np.eye(dofs, dtype=float)
-        v.prior.eta = np.zeros(dofs, dtype=float)
 
-        super_var_nodes[sid] = v
-        fg.var_nodes.append(v)
-
-        # === Stack base belief ===
-        mu_blocks = []
-        Sigma_blocks = []
-        for bid, (st, d) in local_idx[sid].items():
+            # === Stack base belief ===
             vb = id2var[bid]
             mu_blocks.append(vb.mu)
             Sigma_blocks.append(vb.Sigma)
-        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
-        Sigma_super = scipy.linalg.block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
 
+        super_var_nodes[sid] = v
+        v.GT = gt_vec
+
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
+        Sigma_super = block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
         lam = np.linalg.inv(Sigma_super)
         eta = lam @ mu_super
         v.mu = mu_super
         v.Sigma = Sigma_super
         v.belief = NdimGaussian(dofs, eta, lam)
+        v.prior.lam = 1e-10 * lam
+        v.prior.eta = 1e-10 * eta
 
+        fg.var_nodes.append(v)
 
     fg.n_var_nodes = len(fg.var_nodes)
 
@@ -664,6 +761,7 @@ def build_super_graph(layers):
                 x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
 
                 Jloc = f.jac_fn(x_loc)
+                
                 # Map Jloc column blocks back to the super variable columns
                 row = np.zeros((Jloc.shape[0], ncols))
                 c0 = 0
@@ -744,6 +842,7 @@ def build_super_graph(layers):
                 row[:, right_start:right_start+dj] = Jloc[:, di:di+dj] 
 
                 Jrows.append(row)
+            
             return np.vstack(Jrows) 
 
         z_list = [f.measurement for f in cross]
@@ -783,23 +882,22 @@ def build_super_graph(layers):
     return fg
 
 
-
 def build_abs_graph(
     layers,
-    r_reduced = 2):
+    r_reduced = 2,
+    eta_damping=0.2):
 
     abs_var_nodes = {}
     Bs = {}
     ks = {}
     k2s = {}
-    r = 2
 
     # === 1. Build Abstraction Variables ===
-    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=0)
+    abs_fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
     sup_fg = layers[-2]["graph"]
 
     for sn in sup_fg.var_nodes:
-        if sn.dofs <= r:
+        if sn.dofs <= r_reduced:
             r = sn.dofs  # No reduction if dofs already <= r
         else:
             r = r_reduced
@@ -831,8 +929,8 @@ def build_abs_graph(
 
         v = VariableNode(sid, dofs=r)
         v.GT = sn.GT
-        v.prior.lam = 1e-10 * np.eye(r, dtype=float)
-        v.prior.eta = np.zeros(r, dtype=float)
+        v.prior.lam = 1e-10 * varis_abs_lam
+        v.prior.eta = 1e-10 * varis_abs_eta
         v.mu = varis_abs_mu
         v.Sigma = varis_abs_sigma
         v.belief = NdimGaussian(r, varis_abs_eta, varis_abs_lam)
@@ -917,10 +1015,263 @@ def build_abs_graph(
     return abs_fg, Bs, ks, k2s
 
 
+
+def update_super_graph_linearized(layers, eta_damping=0.2):
+    """
+    Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
+    Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
+    layers[-1]["node_map"]: { base_node_id (str, e.g., 'b12') -> super_node_id (str) }
+    """
+    # ---------- Extract base & super ----------
+    base_graph = layers[-2]["graph"]
+    super_nodes = layers[-1]["nodes"]
+    super_edges = layers[-1]["edges"]
+    node_map    = layers[-1]["node_map"]   # 'bN' -> 'sX_...'
+
+    # base: id(int) -> VariableNode, handy to query dofs and mu
+    id2var = {vn.variableID: vn for vn in base_graph.var_nodes}
+
+    # ---------- super_id -> [base_id(int)] ----------
+    super_groups = {}
+    for b_str, s_id in node_map.items():
+        b_int = int(b_str)
+        super_groups.setdefault(s_id, []).append(b_int)
+
+
+    # ---------- For each super group, build a (start, dofs) table ----------
+    # local_idx[sid][bid] = (start, dofs), total_dofs[sid] = sum(dofs)
+    local_idx   = {}
+    total_dofs  = {}
+    for sid, group in super_groups.items():
+        off = 0
+        local_idx[sid] = {}
+        for bid in group:
+            d = id2var[bid].dofs
+            local_idx[sid][bid] = (off, d)
+            off += d
+        total_dofs[sid] = off
+
+
+    # ---------- Create super VariableNodes ----------
+    fg = FactorGraph(nonlinear_factors=False, eta_damping=eta_damping)
+
+
+    super_var_nodes = {}
+    for i, sn in enumerate(super_nodes):
+        sid = sn["data"]["id"]
+        dofs = total_dofs.get(sid, 0)
+
+        v = VariableNode(i, dofs=dofs)
+        gt_vec = np.zeros(dofs)
+        mu_blocks = []
+        Sigma_blocks = []
+        for bid, (st, d) in local_idx[sid].items():
+            # === Stack base GT ===
+            gt_base = getattr(id2var[bid], "GT", None)
+            if gt_base is None or len(gt_base) != d:
+                gt_base = np.zeros(d)
+            gt_vec[st:st+d] = gt_base
+
+            # === Stack base belief ===
+            vb = id2var[bid]
+            mu_blocks.append(vb.mu)
+            Sigma_blocks.append(vb.Sigma)
+
+        super_var_nodes[sid] = v
+        v.GT = gt_vec
+
+        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(dofs)
+        Sigma_super = block_diag(*Sigma_blocks) if Sigma_blocks else np.eye(dofs)
+        lam = np.linalg.inv(Sigma_super)
+        eta = lam @ mu_super
+        v.mu = mu_super
+        v.Sigma = Sigma_super
+        v.belief = NdimGaussian(dofs, eta, lam)
+        v.prior.lam = 1e-10 * lam
+        v.prior.eta = 1e-10 * eta
+
+        fg.var_nodes.append(v)
+
+
+    fg.n_var_nodes = len(fg.var_nodes)
+
+    # ---------- Utility: assemble a group's linpoint (using base belief means) ----------
+    def make_linpoint_for_group(sid):
+        x = np.zeros(total_dofs[sid])
+        for bid, (st, d) in local_idx[sid].items():
+            mu = getattr(id2var[bid], "mu", None)
+            if mu is None or len(mu) != d:
+                mu = np.zeros(d)
+            x[st:st+d] = mu
+        return x
+
+    # ---------- 3) super prior (in-group unary + in-group binary) ----------
+    def make_super_prior_factor(sid, lin0, base_factors):
+        group = super_groups[sid]
+        idx_map = local_idx[sid]
+        ncols = total_dofs[sid]
+
+        # Select factors whose variables are all within the group (unary or binary)
+        in_group = []
+        for f in base_factors:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            if all(vid in group for vid in vids):
+                in_group.append(f)
+
+        def jac_fn_super_prior(x_super, *args):
+            Jrows = []
+            for f in in_group:
+                vids = [v.variableID for v in f.adj_var_nodes]
+                # Build this factor's local x for (potentially) nonlinear Jacobian
+                x_loc_list = []
+                dims = []
+                for vid in vids:
+                    st, d = idx_map[vid]
+                    dims.append(d)
+                    x_loc_list.append(lin0[st:st+d])
+                x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
+
+                Jloc = f.jac_fn(x_loc)
+                # Map Jloc column blocks back to the super variable columns
+                row = np.zeros((Jloc.shape[0], ncols))
+                c0 = 0
+                for vid, d in zip(vids, dims):
+                    st, _ = idx_map[vid]
+                    row[:, st:st+d] = Jloc[:, c0:c0+d]
+                    c0 += d
+
+                Jrows.append(row)
+            return np.vstack(Jrows) if Jrows else np.zeros((0, ncols))
+
+        J = jac_fn_super_prior(x_super=lin0)
+        meas_fn = []
+        for f in in_group:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            # Build this factor's local x for (potentially) nonlinear Jacobian
+            x_loc_list = []
+            dims = []
+            for vid in vids:
+                st, d = idx_map[vid]
+                dims.append(d)
+                x_loc_list.append(lin0[st:st+d])
+            x_loc = np.concatenate(x_loc_list) if x_loc_list else np.zeros(0)
+            meas_fn.append(f.meas_fn(x_loc))
+        meas_fn = np.concatenate(meas_fn) 
+        def meas_fn_super_prior(x_super, *args):
+            return meas_fn + J@(x_super-lin0)
+
+        # z_super: concatenate each base factor's z
+        z_list = [f.measurement for f in in_group]
+        z_lambda_list = [f.measurement_lambda for f in in_group]
+        z_super = np.concatenate(z_list) 
+        z_super_lambda = block_diag(*z_lambda_list)
+
+        return meas_fn_super_prior, jac_fn_super_prior, z_super, z_super_lambda 
+
+    # ---------- 4) super between (cross-group binary) ----------
+    def make_super_between_factor(sidA, sidB, lin0, base_factors):
+        groupA, groupB = super_groups[sidA], super_groups[sidB]
+        idxA, idxB = local_idx[sidA], local_idx[sidB]
+        nA, nB = total_dofs[sidA], total_dofs[sidB]
+
+        cross = []
+        for f in base_factors:
+            vids = [v.variableID for v in f.adj_var_nodes]
+            if len(vids) != 2:
+                continue
+            i, j = vids
+            # One side in A, the other side in B
+            if (i in groupA and j in groupB) or (i in groupB and j in groupA):
+                cross.append(f)
+
+        
+        def jac_fn_super_between(xAB, *args):
+            xA, xB = lin0[:nA], lin0[nA:]
+            Jrows = []
+            for f in cross:
+                i, j = [v.variableID for v in f.adj_var_nodes]
+                if i in groupA:
+                    si, di = idxA[i]
+                    sj, dj = idxB[j]
+                    xi = xA[si:si+di]
+                    xj = xB[sj:sj+dj]
+                    left_start, right_start = si, nA + sj
+                else:
+                    si, di = idxB[i]
+                    sj, dj = idxA[j]
+                    xi = xB[si:si+di]
+                    xj = xA[sj:sj+dj]
+                    left_start, right_start = nA + si, sj
+
+                x_loc = np.concatenate([xi, xj])
+                Jloc = f.jac_fn(x_loc)
+                row = np.zeros((Jloc.shape[0], nA + nB))
+                row[:, left_start:left_start+di]   = Jloc[:, :di] 
+                row[:, right_start:right_start+dj] = Jloc[:, di:di+dj] 
+                Jrows.append(row)
+
+            return np.vstack(Jrows) 
+        
+        J = jac_fn_super_between(xAB=lin0)
+        xA, xB = lin0[:nA], lin0[nA:]
+        meas_fn = []
+        for f in cross:
+            i, j = [v.variableID for v in f.adj_var_nodes]
+            if i in groupA:
+                si, di = idxA[i]
+                sj, dj = idxB[j]
+                xi = xA[si:si+di]
+                xj = xB[sj:sj+dj]
+            else:
+                si, di = idxB[i]
+                sj, dj = idxA[j]
+                xi = xB[si:si+di]
+                xj = xA[sj:sj+dj]
+            x_loc = np.concatenate([xi, xj])
+            meas_fn.append(f.meas_fn(x_loc))
+        meas_fn = np.concatenate(meas_fn) 
+        def meas_fn_super_between(xAB, *args):
+            return meas_fn + J@(xAB-lin0)
+
+        z_list = [f.measurement for f in cross]
+        z_lambda_list = [f.measurement_lambda for f in cross]
+        z_super = np.concatenate(z_list) 
+        z_super_lambda = block_diag(*z_lambda_list)
+
+        return meas_fn_super_between, jac_fn_super_between, z_super, z_super_lambda
+
+
+    for e in super_edges:
+        u, v = e["data"]["source"], e["data"]["target"]
+
+        if v == "prior":
+            lin0 = make_linpoint_for_group(u)
+            meas_fn, jac_fn, z, z_lambda = make_super_prior_factor(u, lin0, base_graph.factors)
+            f = Factor(len(fg.factors), [super_var_nodes[u]], z, z_lambda, meas_fn, jac_fn)
+            f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
+            f.type = "super_prior"
+            f.compute_factor(linpoint=lin0, update_self=True)
+            fg.factors.append(f)
+            super_var_nodes[u].adj_factors.append(f)
+            
+        else:
+            lin0 = np.concatenate([make_linpoint_for_group(u), make_linpoint_for_group(v)])
+            meas_fn, jac_fn, z, z_lambda = make_super_between_factor(u, v, lin0, base_graph.factors)
+            f = Factor(len(fg.factors), [super_var_nodes[u], super_var_nodes[v]], z, z_lambda, meas_fn, jac_fn)
+            f.adj_beliefs = [vn.belief for vn in f.adj_var_nodes]
+            f.type = "super_between"
+            f.compute_factor(linpoint=lin0, update_self=True)
+            fg.factors.append(f)
+            super_var_nodes[u].adj_factors.append(f)
+            super_var_nodes[v].adj_factors.append(f)
+
+    fg.n_factor_nodes = len(fg.factors)
+    return fg
+
+
 def bottom_up_modify_super_graph(layers):
     """
-    Update super-node means (mu) from base nodes,
-    and simultaneously adjust variable beliefs and adjacent messages.
+    modify the super graph's meas_fn and jac_fn according to the base graph's current jacobians.
     """
 
     base_graph = layers[-2]["graph"]
@@ -936,45 +1287,6 @@ def bottom_up_modify_super_graph(layers):
 
     sid2idx = {sn["data"]["id"]: i for i, sn in enumerate(layers[-1]["nodes"])}
 
-    for sid, group in super_groups.items():
-        mu_blocks = [id2var[bid].mu for bid in group]
-        mu_super = np.concatenate(mu_blocks) if mu_blocks else np.zeros(0)
-
-        if sid in sid2idx:
-            idx = sid2idx[sid]
-            v = super_graph.var_nodes[idx]
-
-            # Old belief
-            old_belief = v.belief
-
-            # 1. Update mu
-            #v.mu = mu_super
-
-            # 2. New belief (use old Sigma + new mu)
-            #lam = np.linalg.inv(v.Sigma)
-            #eta = lam @ v.mu
-            #new_belief = NdimGaussian(v.dofs, eta, lam)
-            #v.belief = new_belief
-            #v.prior = NdimGaussian(v.dofs)
-
-
-        """
-            # 3. update adj_beliefs and messages
-            if v.adj_factors:
-                n_adj = len(v.adj_factors)
-                d_eta = new_belief.eta - old_belief.eta
-                d_lam = new_belief.lam - old_belief.lam
-                for f in v.adj_factors:
-                    if v in f.adj_var_nodes:
-                        idx_in_factor = f.adj_var_nodes.index(v)
-                        # update factor's adj_belief
-                        f.adj_beliefs[idx_in_factor] = new_belief
-                        # update corresponding messages
-                        msg = f.messages[idx_in_factor]
-                        msg.eta += d_eta / n_adj
-                        msg.lam += d_lam / n_adj
-                        f.messages[idx_in_factor] = msg
-        """
 
 
 def top_down_modify_base_and_abs_graph(layers):
@@ -1024,8 +1336,7 @@ def top_down_modify_base_and_abs_graph(layers):
             eta = v.belief.lam @ v.mu
             new_belief = NdimGaussian(v.dofs, eta, v.belief.lam)
             v.belief = new_belief
-            v.prior = NdimGaussian(v.dofs, 0.1*v.mu, 0.1*np.eye(v.dofs))
-
+            v.prior = NdimGaussian(v.dofs, 1e-10*eta, 1e-10*v.belief.lam)
 
             # 3. Sync to adjacent factors (this step is important)
             if v.adj_factors:
@@ -1040,8 +1351,8 @@ def top_down_modify_base_and_abs_graph(layers):
                         f.adj_beliefs[idx] = new_belief
                         # correct coresponding message
                         msg = f.messages[idx]
-                        msg.eta += 0.1*d_eta / n_adj
-                        msg.lam += 0.1*d_lam / n_adj
+                        msg.eta += d_eta / n_adj
+                        msg.lam += d_lam / n_adj
                         f.messages[idx] = msg
 
     return base_graph
@@ -1086,7 +1397,7 @@ def top_down_modify_super_graph(layers):
         eta = sn.belief.lam @ sn.mu
         new_belief = NdimGaussian(sn.dofs, eta, sn.belief.lam)
         sn.belief  = new_belief
-        #sn.prior = NdimGaussian(sn.dofs, 0.01*sn.mu, 0.01*np.eye(sn.dofs))
+        sn.prior = NdimGaussian(sn.dofs, 1e-10*eta, 1e-10*sn.belief.lam)
 
     # ---- Then push abs messages back to super, preserving the original super messages on the orthogonal complement ----
     # Idea: for the side of the super factor f_sup connected to variable sid:
@@ -1101,7 +1412,6 @@ def top_down_modify_super_graph(layers):
             f_sup.adj_beliefs[idx_side] = sn.belief
 
     return
-
 
 
 def refresh_gbp_results(layers):
@@ -1129,7 +1439,8 @@ def refresh_gbp_results(layers):
             L["A"], L["b"] = {}, {}
             for v in g.var_nodes:
                 key = str(v.variableID)
-                L["A"][key] = np.eye(2)
+                L["A"][key] = np.array([[1.0, 0.0, 0.0],
+                                        [0.0, 1.0, 0.0]], dtype=float)  # 2x3: 只取 x,y
                 L["b"][key] = np.zeros(2, dtype=float)
 
         # ---- super ----
@@ -1213,64 +1524,94 @@ def refresh_gbp_results(layers):
         L["gbp_result"] = res
 
 
+class VGraph:
+    def __init__(self,
+                 layers,
+                 nonlinear_factors=True,
+                 eta_damping=0.4,
+                 beta=0.0,
+                 iters_since_relinear=0,
+                 num_undamped_iters=0,
+                 min_linear_iters=50,
+                 wild_thresh=0):
+
+        self.layers = layers
+        self.iters_since_relinear = iters_since_relinear
+        self.min_linear_iters = min_linear_iters
+        self.nonlinear_factors = nonlinear_factors
+        self.eta_damping = eta_damping
+        self.wild_thresh = wild_thresh
+
+        #self.energy_history = []
+        #self.error_history = []
+        #self.nmsgs_history = []
+        #self.mus = []
 
 
-def vloop(layers):
-    """
-    Simplified V-cycle:
-    1) bottom-up: rebuild and iterate once for base / super / abs in order
-    2) top-down: propagate mu from super -> base
-    3) refresh gbp_result on each layer for UI use
-    """
+    def vloop(self):
+        """
+        Simplified V-cycle:
+        1) bottom-up: rebuild and iterate once for base / super / abs in order
+        2) top-down: propagate mu from super -> base
+        3) refresh gbp_result on each layer for UI use
+        """
 
-    # ---- bottom-up ----
-    if layers and "graph" in layers[0]:
-        layers[0]["graph"].synchronous_iteration()
-        
-    for i in range(1, len(layers)):
-        # After build, one iteration per layer
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
+        layers = self.layers
 
-        name = layers[i]["name"]
-        if name.startswith("super1"):
-            # Update super using the previous layer's graph
-            # layers[i]["graph"] = build_super_graph(layers[:i+1])
-            bottom_up_modify_super_graph(layers[:i+1])
+        # ---- bottom-up ----
+        #if layers and "graph" in layers[0]:
+        #    layers[0]["graph"].synchronous_iteration()
+            
+        for i in range(1, len(layers)):
+            name = layers[i]["name"]
 
-        elif name.startswith("super"):
-            # Update super using the previous layer's graph
-            layers[i]["graph"] = build_super_graph(layers[:i+1])
+            if name.startswith("super1"):
+                # Update super using the previous base graph's new linearization points
+                if self.iters_since_relinear >= self.min_linear_iters:
+                    print("relinarizing super1 layer")
+                    layers[i]["graph"] = update_super_graph_linearized(layers[:i+1], eta_damping=self.eta_damping)
+                    self.iters_since_relinear = 0
+                else:
+                    self.iters_since_relinear += 1
 
-        elif name.startswith("abs"):
-            # Rebuild abs using the previous super
-            abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], r_reduced=2)
-            layers[i]["graph"] = abs_graph
-            layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
+            elif name.startswith("super"):
+                # Update super using the previous layer's graph
+                layers[i]["graph"] = build_super_graph(layers[:i+1], eta_damping=self.eta_damping)
 
+            elif name.startswith("abs"):
+                # Rebuild abs using the previous super
+                abs_graph, Bs, ks, k2s = build_abs_graph(layers[:i+1], eta_damping=self.eta_damping)
+                layers[i]["graph"] = abs_graph
+                layers[i]["Bs"], layers[i]["ks"], layers[i]["k2s"] = Bs, ks, k2s
 
-    # ---- top-down (pass mu) ----
-    for i in range(len(layers) - 1, 0, -1):
-        # After two iterations per layer, reproject
-        if "graph" in layers[i]:
-            layers[i]["graph"].synchronous_iteration()
-        # this is very important, but dont know why yet
-        # so abs layer need more iterations
-        if name.startswith("abs"):
-            layers[i]["graph"].synchronous_iteration()  
+            # After build, one iteration per layer
+            if "graph" in layers[i]:
+                layers[i]["graph"].synchronous_iteration()
 
-        name = layers[i]["name"]
-        if name.startswith("super"):
-            # Split super.mu back to base/abs
-            top_down_modify_base_and_abs_graph(layers[:i+1])
-        elif name.startswith("abs"):
-            # Project abs.mu back to super
-            top_down_modify_super_graph(layers[:i+1])
+        # ---- top-down (pass mu) ----
+        for i in range(len(layers) - 1, 0, -1):
+            # After one iterations per layer, reproject
+            if "graph" in layers[i]:
+                layers[i]["graph"].synchronous_iteration()
 
+            # this is very important, but dont know why yet
+            # so abs layer need more iterations
+            #if name.startswith("abs"):
+                #layers[i]["graph"].synchronous_iteration()  
 
-    # ---- refresh gbp_result for UI ----
-    refresh_gbp_results(layers)
+            name = layers[i]["name"]
+            if name.startswith("super"):
+                # Split super.mu back to base/abs
+                top_down_modify_base_and_abs_graph(layers[:i+1])
 
+            elif name.startswith("abs"):
+                # Project abs.mu back to super
+                top_down_modify_super_graph(layers[:i+1])
+
+        # ---- refresh gbp_result for UI ----
+        #refresh_gbp_results(layers)
+        return layers
+vg = VGraph(layers)
 
 # -----------------------
 # Layout
@@ -1336,7 +1677,7 @@ app.layout = html.Div([
             dcc.Input(id="grid-gy", type="number", value=2, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("K:", style={"marginRight":"6px"}),
-            dcc.Input(id="kmeans-k", type="number", value=128, min=1, step=1,
+            dcc.Input(id="kmeans-k", type="number", value=5, min=1, step=1,
                       style={"width":"100px", "marginRight":"12px"}),
             html.Span("seed:", style={"marginRight":"6px"}),
             dcc.Input(id="rand-seed", type="number", value=2001, step=1,
@@ -1353,15 +1694,11 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Span("prior σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="prior-noise", type="number", value=1.0, step=0.001,
+            dcc.Input(id="prior-noise", type="number", value=1.0, step=0.01,
                     style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("odom σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.001,
-                    style={"width":"100px", "marginRight":"12px"}),
-
-            html.Span("loop σ:", style={"marginRight":"6px"}),
-            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.001,
+            dcc.Input(id="odom-noise", type="number", value=1.0, step=0.01,
                     style={"width":"100px", "marginRight":"12px"}),
 
             html.Span("iters:", style={"marginRight":"6px"}),
@@ -1466,28 +1803,28 @@ app.layout = html.Div([
 )
 def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                   pN, pStep, pProb, pRadius, pPrior, pOdom, pPriorProp, seed):
-    global layers, pair_idx, gbp_graph
+    global layers, pair_idx, gbp_graph, vg
     ctx = dash.callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
     if triggered == "new-graph":
-        if seed is None or seed == 0:
-            rng = np.random.default_rng()        # Random initialization
-        else:
-            rng = np.random.default_rng(seed)    # Fixed seed
+        if seed == 0 or seed is None:
+            seed = np.random.randint(0,2**32)        # Random initialization
+
         N = int(pN or 100)
         step = float(pStep or 25)
         prob = float(pProb or 0.05)
         radius = float(pRadius or 50)
         prior_prop=float(pPriorProp or 0.00)
-        layers = init_layers(N, step, prob, radius, prior_prop, rng=rng)
+        layers = init_layers(N, step, prob, radius, prior_prop, seed)
+        vg = VGraph(layers)
         pair_idx = 0
         reset_global_bounds(layers[0]["nodes"])
         # Build the GBP graph (rendering still shows GT at this point)
         gbp_graph = build_noisy_pose_graph(layers[0]["nodes"], layers[0]["edges"],
                                            prior_sigma=float(pPrior or 1.0),
-                                           odom_sigma=float(pOdom or 1.0)
-                                           )
+                                           odom_sigma=float(pOdom or 1.0),
+                                           seed=seed)
         layers[0]["graph"] = gbp_graph
         opts=[{"label":"base","value":"base"}]
         return opts, "base"
@@ -1508,7 +1845,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
             layers[-1]["graph"].synchronous_iteration() 
 
             layers.append({"name":f"abs{k}", "nodes":abs_nodes, "edges":abs_edges})
-            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=2)
+            layers[abs_layer_idx]["graph"], layers[abs_layer_idx]["Bs"], layers[abs_layer_idx]["ks"], layers[abs_layer_idx]["k2s"] = build_abs_graph(layers, r_reduced=3)
         else:
             k_next = pair_idx + 1
             super_layer_idx = k_next*2 - 1
@@ -1518,10 +1855,12 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
                 super_nodes, super_edges, node_map = fuse_to_super_kmeans(last["nodes"], last["edges"], int(kk or 8), super_layer_idx)
             else:
                 super_nodes, super_edges, node_map = fuse_to_super_order(last["nodes"], last["edges"], int(kk or 8), super_layer_idx, tail_heavy=True)
-            # Ensure super graph has run at least once
-            layers[-1]["graph"].synchronous_iteration() 
+
             layers.append({"name":f"super{k_next}", "nodes":super_nodes, "edges":super_edges, "node_map":node_map})
-            layers[super_layer_idx]["graph"] = build_super_graph(layers)
+            if super_layer_idx == 1:
+                layers[super_layer_idx]["graph"] = build_super_graph(layers)
+            else:
+                layers[super_layer_idx]["graph"] = build_super_graph(layers)
 
             pair_idx = k_next
 
@@ -1669,6 +2008,7 @@ def unified_solver(gbp_click, gbp_ticks,
                    gbp_state, vcycle_state,
                    iters, snap_int, current_layer):
 
+    global layers, vg
     ctx = dash.callback_context
     if not ctx.triggered:
         return no_update, no_update, gbp_state, True, no_update, \
@@ -1779,7 +2119,8 @@ def unified_solver(gbp_click, gbp_ticks,
         batch = max(1, min(snap_int, iters_total - iters_done))
 
         for _ in range(batch):
-            vloop(layers)
+            vg.layers = layers
+            vg.layers = vg.vloop()
 
         refresh_gbp_results(layers)
         latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]
@@ -1800,4 +2141,4 @@ def unified_solver(gbp_click, gbp_ticks,
 
 # -----------------------
 if __name__=="__main__":
-    app.run(debug=True, port=8050)
+    app.run(debug=True, port=8051)
