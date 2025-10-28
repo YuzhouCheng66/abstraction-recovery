@@ -14,7 +14,7 @@ app.title = "Factor Graph SVD Abs&Recovery"
 
 
 
-def update_super_graph_linearized(layers, eta_damping=0.2):
+def update_super_graph_linearized(layers, eta_damping=0.4):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -783,7 +783,7 @@ def build_noisy_pose_graph(
     return fg
 
 
-def build_super_graph(layers, eta_damping=0.2):
+def build_super_graph(layers, eta_damping=0.4):
     """
     Construct the super graph based on the base graph in layers[-2] and the super-grouping in layers[-1].
     Requirement: layers[-2]["graph"] is an already-built base graph (with unary/binary factors).
@@ -1034,7 +1034,7 @@ def build_super_graph(layers, eta_damping=0.2):
 def build_abs_graph(
     layers,
     r_reduced = 2,
-    eta_damping=0.2):
+    eta_damping=0.4):
 
     abs_var_nodes = {}
     Bs = {}
@@ -1527,18 +1527,25 @@ def vloop(layers):
 
 def compute_energy(layers):
     """
-    energy = sum_i || mu_i - GT_i ||_1  over base layer variables
+    energy = 0.5 * sum_i || mu_i[0:2] - GT_i[0:2] ||^2  over base layer variables
+    vectorized version (no per-node np calls)
     """
     try:
         base_graph = layers[0].get("graph", None)
-        if base_graph is None or not getattr(base_graph, "var_nodes", None):
-            return "energy: -"
-        total = 0.0
-        for v in base_graph.var_nodes:
-            total += float(np.linalg.norm(v.mu - v.gt))
-        return f"energy: {total:.4f}"
+        var_nodes = getattr(base_graph, "var_nodes", None)
+        if base_graph is None or not var_nodes:
+            return "Energy: -"
+
+        # Stack mu[:2] and GT[:2] for all variables into (N, 2)
+        mus_2 = np.stack([np.asarray(v.mu[:2], dtype=float) for v in var_nodes], axis=0)
+        gts_2 = np.stack([np.asarray(v.GT[:2], dtype=float) for v in var_nodes], axis=0)
+
+        diff = mus_2 - gts_2                      # shape (N, 2)
+        total = 0.5 * np.sum(diff * diff)         # 0.5 * sum of squared norms
+
+        return f"Energy: {float(total):.4f}"
     except Exception:
-        return "energy: -"
+        return "Energy: -"
     
 
 
@@ -1585,12 +1592,7 @@ class VGraph:
 
             if name.startswith("super1"):
                 # Update super using the previous base graph's new linearization points
-                if self.iters_since_relinear >= self.min_linear_iters:
-                    print("relinarizing super1 layer")
-                    layers[i]["graph"] = update_super_graph_linearized(layers[:i+1], eta_damping=self.eta_damping)
-                    self.iters_since_relinear = 0
-                else:
-                    self.iters_since_relinear += 1
+                pass
 
             elif name.startswith("super"):
                 # Update super using the previous layer's graph
@@ -2008,6 +2010,7 @@ from dash import no_update
     Output("vcycle-state", "data"),
     Output("vcycle-interval", "disabled"),
     Output("vcycle-interval", "n_intervals"),
+    Output("energy-status", "children"),
     Input("gbp-run", "n_clicks"),
     Input("gbp-interval", "n_intervals"),
     Input("vcycle-run", "n_clicks"),
@@ -2032,7 +2035,7 @@ def unified_solver(gbp_click, gbp_ticks,
     ctx = dash.callback_context
     if not ctx.triggered:
         return no_update, no_update, gbp_state, True, no_update, \
-               no_update, vcycle_state, True, no_update
+               no_update, vcycle_state, True, no_update, no_update
 
     trig = ctx.triggered[0]["prop_id"]
 
@@ -2040,7 +2043,7 @@ def unified_solver(gbp_click, gbp_ticks,
     if trig.startswith("new-graph"):
         reset_state = {"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}
         return None, "Ready. New graph created.", reset_state, True, 0, \
-               "", reset_state, True, 0
+               "", reset_state, True, 0, "Energy: -"
 
     # ==== Project Layer ====
     if trig.startswith("project-layer"):
@@ -2049,7 +2052,7 @@ def unified_solver(gbp_click, gbp_ticks,
             idx = next(i for i, L in enumerate(layers) if L["name"] == current_layer)
         except StopIteration:
             return no_update, f"Layer '{current_layer}' not found.", gbp_state, True, no_update, \
-                   no_update, vcycle_state, True, no_update
+                   no_update, vcycle_state, True, no_update, no_update
 
         kind, k = parse_layer_name(current_layer)
 
@@ -2057,14 +2060,14 @@ def unified_solver(gbp_click, gbp_ticks,
             # super -> base
             if idx - 1 < 0 or "graph" not in layers[idx] or "graph" not in layers[idx-1]:
                 return no_update, f"Cannot project: graphs not ready for {current_layer}.", gbp_state, True, no_update, \
-                       no_update, vcycle_state, True, no_update
+                       no_update, vcycle_state, True, no_update, no_update
             top_down_modify_base_and_abs_graph(layers[:idx+1])
             msg = f"Projected {current_layer} → base."
         elif kind == "abs":
             # abs -> super
             if "graph" not in layers[idx] or "graph" not in layers[idx-1]:
                 return no_update, f"Cannot project: graphs not ready for {current_layer}.", gbp_state, True, no_update, \
-                       no_update, vcycle_state, True, no_update
+                       no_update, vcycle_state, True, no_update, no_update
             top_down_modify_super_graph(layers[:idx+1])
             msg = f"Projected {current_layer} → super."
         else:
@@ -2075,29 +2078,29 @@ def unified_solver(gbp_click, gbp_ticks,
         refresh_gbp_results(layers)
         latest_positions = layers[idx].get("gbp_result", None)
         return latest_positions, msg, gbp_state, True, no_update, \
-               no_update, vcycle_state, True, no_update
+               no_update, vcycle_state, True, no_update, compute_energy(layers)
 
     # ==== GBP Solver ====
     if trig.startswith("gbp-run"):
         graph = next((L.get("graph") for L in layers if L["name"] == current_layer), None)
         if graph is None:
             return no_update, f"No factor graph in {current_layer}.", gbp_state, True, no_update, \
-                   no_update, vcycle_state, True, no_update
+                   no_update, vcycle_state, True, no_update, no_update
         iters = int(iters or 50)
         snap_int = int(snap_int or 5)
         gbp_state = {"running": True, "iters_done": 0, "iters_total": iters, "snap_int": snap_int}
         return no_update, f"GBP running... 0/{iters}", gbp_state, False, 0, \
-               no_update, vcycle_state, True, no_update
+               no_update, vcycle_state, True, no_update, compute_energy(layers)
 
     if trig.startswith("gbp-interval"):
         if not gbp_state or not gbp_state.get("running"):
             return no_update, no_update, gbp_state, True, no_update, \
-                   no_update, vcycle_state, True, no_update
+                   no_update, vcycle_state, True, no_update, no_update
 
         graph = next((L.get("graph") for L in layers if L["name"] == current_layer), None)
         if graph is None:
             return no_update, no_update, gbp_state, True, no_update, \
-                   no_update, vcycle_state, True, no_update
+                   no_update, vcycle_state, True, no_update, no_update
 
         iters_done = gbp_state["iters_done"]
         iters_total = gbp_state["iters_total"]
@@ -2118,7 +2121,7 @@ def unified_solver(gbp_click, gbp_ticks,
         status = (f"GBP running {iters_done}/{iters_total}"
                   if not finished else f"GBP finished {iters_total} iters.")
         return latest_positions, status, gbp_state, finished, no_update, \
-               no_update, vcycle_state, True, no_update
+               no_update, vcycle_state, True, no_update, compute_energy(layers)
 
     # ==== V Cycle ====
     if trig.startswith("vcycle-run"):
@@ -2126,12 +2129,12 @@ def unified_solver(gbp_click, gbp_ticks,
         snap_int = int(snap_int or 5)
         vcycle_state = {"running": True, "iters_done": 0, "iters_total": iters, "snap_int": snap_int}
         return no_update, no_update, gbp_state, True, no_update, \
-               f"V Cycle running... 0/{iters}", vcycle_state, False, 0
+               f"V Cycle running... 0/{iters}", vcycle_state, False, 0, compute_energy(layers)
 
     if trig.startswith("vcycle-interval"):
         if not vcycle_state or not vcycle_state.get("running"):
             return no_update, no_update, gbp_state, True, no_update, \
-                   no_update, vcycle_state, True, no_update
+                   no_update, vcycle_state, True, no_update, compute_energy(layers)
 
         iters_done = vcycle_state["iters_done"]
         iters_total = vcycle_state["iters_total"]
@@ -2140,7 +2143,7 @@ def unified_solver(gbp_click, gbp_ticks,
 
         for _ in range(batch):
             vg.layers = layers
-            layers = vg.vloop()
+            vg.layers = vg.vloop()
 
         refresh_gbp_results(layers)
         latest_positions = layers[[L["name"] for L in layers].index(current_layer)]["gbp_result"]
@@ -2153,11 +2156,10 @@ def unified_solver(gbp_click, gbp_ticks,
         status = (f"V Cycle running {iters_done}/{iters_total}"
                   if not finished else f"V Cycle finished {iters_total} iters.")
         return latest_positions, no_update, gbp_state, True, no_update, \
-               status, vcycle_state, finished, no_update
+               status, vcycle_state, finished, no_update, compute_energy(layers)
 
     return no_update, no_update, gbp_state, True, no_update, \
-           no_update, vcycle_state, True, no_update
-
+           no_update, vcycle_state, True, no_update, compute_energy(layers)
 
 # -----------------------
 if __name__=="__main__":
