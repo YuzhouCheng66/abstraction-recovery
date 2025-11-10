@@ -1518,7 +1518,7 @@ def vloop(layers):
         elif name.startswith("abs"):
             # Project abs.mu back to super
             top_down_modify_super_graph(layers[:i+1])
-
+    
 
     # ---- refresh gbp_result for UI ----
     refresh_gbp_results(layers)
@@ -1553,7 +1553,7 @@ class VGraph:
     def __init__(self,
                  layers,
                  nonlinear_factors=True,
-                 eta_damping=0.4,
+                 eta_damping=0.2,
                  beta=0.0,
                  iters_since_relinear=0,
                  num_undamped_iters=0,
@@ -1788,7 +1788,7 @@ app.layout = html.Div([
     dcc.Interval(id="gbp-interval", interval=200, n_intervals=0, disabled=True),
 
     dcc.Store(id="vcycle-state", data={"running": False, "iters_done": 0, "iters_total": 0, "snap_int": 5}),
-    dcc.Interval(id="vcycle-interval", interval=500, n_intervals=0, disabled=True),
+    dcc.Interval(id="vcycle-interval", interval=1000, n_intervals=0, disabled=True),
 
     cyto.Cytoscape(
         id="cytoscape",
@@ -1886,6 +1886,7 @@ def manage_layers(add_clicks, new_clicks, mode, gx, gy, kk, current_value,
 
             pair_idx = k_next
 
+        #refresh_gbp_results(layers)
     opts=[{"label":L["name"],"value":L["name"]} for L in layers]
     return opts, layers[-1]["name"]
 

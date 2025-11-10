@@ -15,7 +15,7 @@ from utils.distances import bhattacharyya, mahalanobis
 class FactorGraph:
     def __init__(self,
                  nonlinear_factors=True,
-                 eta_damping=0.2,
+                 eta_damping=0,
                  beta=0.0,
                  num_undamped_iters=0,
                  min_linear_iters=200,
