@@ -455,18 +455,21 @@ class FactorGraph:
             If nonlinear factors, it is taken at the current linearisation point.
         """
 
-        eta = np.array([])
-        lam = np.array([])
-        var_ix = np.zeros(len(self.var_nodes)).astype(int)
-        tot_n_vars = 0
-        for var_node in self.var_nodes:
-            var_ix[var_node.variableID] = int(tot_n_vars)
-            tot_n_vars += var_node.dofs
-            eta = np.concatenate((eta, var_node.prior.eta))
-            if var_node.variableID == 0:
-                lam = var_node.prior.lam
-            else:
-                lam = scipy.linalg.block_diag(lam, var_node.prior.lam)
+        sizes = [vn.dofs for vn in self.var_nodes]
+        total = sum(sizes)
+
+        eta = np.empty(total, dtype=float)                 # Direct one-time allocation
+        lam = np.zeros((total, total), dtype=float)        # Pre-allocate large zero array
+        var_ix = np.empty(len(self.var_nodes), dtype=int)
+
+        offset = 0
+        for vn in self.var_nodes:
+            m = vn.dofs
+            var_ix[vn.variableID] = offset
+            eta[offset:offset+m] = vn.prior.eta           # Write fragments without copying extra memory
+            lam[offset:offset+m, offset:offset+m] = vn.prior.lam
+            offset += m
+
 
         for count, factor in enumerate(self.factors):
             factor_ix = 0
@@ -912,7 +915,6 @@ class Factor:
             messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
 
 
-            
         for v in range(len(self.adj_vIDs)):
             #self.messages_dist[v] = bhattacharyya(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
             if self.b_calc_mess_dist:
