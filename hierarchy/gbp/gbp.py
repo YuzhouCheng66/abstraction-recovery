@@ -797,7 +797,7 @@ class Factor:
             lambda_factor = self.measurement_lambda * np.outer(J, J)
             eta_factor = self.measurement_lambda * J.T * (J @ self.linpoint + self.measurement - pred_measurement)
         else:
-            print(J.shape, self.measurement_lambda.shape)
+            #print(J.shape, self.measurement_lambda.shape)
             lambda_factor = J.T @ self.measurement_lambda @ J
             eta_factor = (J.T @ self.measurement_lambda) @ (J @ self.linpoint + self.measurement - pred_measurement)
 
