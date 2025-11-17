@@ -5,7 +5,6 @@
 import numpy as np
 import time
 import scipy.linalg
-import jax
 from utils.gaussian import NdimGaussian
 from utils.distances import bhattacharyya, mahalanobis
 
