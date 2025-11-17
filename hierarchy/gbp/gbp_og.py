@@ -5,7 +5,7 @@
 import numpy as np
 import time
 import scipy.linalg
-import jax
+
 from utils.gaussian import NdimGaussian
 from utils.distances import bhattacharyya, mahalanobis
 
@@ -779,16 +779,13 @@ class Factor:
             If not given then linearisation point is mean of belief of adjacent nodes.
             If measurement model is linear then factor will always be the same regardless of linearisation point.
         """
-
         if linpoint is None:
-            self.linpoint = np.concatenate([
-                np.asarray(v.mu) for v in self.adj_var_nodes
-            ])
-
+            self.linpoint = []
+            for belief in self.adj_beliefs:
+                self.linpoint += list(1/np.diagonal(belief.lam) * belief.eta)
         else:
             self.linpoint = linpoint
 
-        """
         if isinstance(self.jac_fn, list):
             J = np.array(self.jac_fn)
             pred_measurement = J @ self.linpoint
@@ -803,15 +800,6 @@ class Factor:
             #print(J.shape, self.measurement_lambda.shape)
             lambda_factor = J.T @ self.measurement_lambda @ J
             eta_factor = (J.T @ self.measurement_lambda) @ (J @ self.linpoint + self.measurement - pred_measurement)
-        """
-        # They are all lists
-        J = self.jac_fn(self.linpoint, *self.args)
-        pred_measurement = self.meas_fn(self.linpoint, *self.args)
-        lambda_factor = np.zeros_like(self.factor.lam)
-        eta_factor = np.zeros_like(self.factor.eta)
-        for i in range(len(J)):
-            lambda_factor += J[i].T @ self.measurement_lambda[i] @ J[i]
-            eta_factor += J[i].T @ (self.measurement_lambda[i] @ (J[i] @ self.linpoint + self.measurement[i] - pred_measurement[i]))
 
         if update_self:
             self.factor.eta, self.factor.lam = eta_factor, lambda_factor
@@ -920,26 +908,11 @@ class Factor:
                 lnono = lam_factor[:divide, :divide]
 
             lnono += 1e-12 * np.eye(lnono.shape[0])
-            
-            try:
-                L = np.linalg.cholesky(lnono)
-            except np.linalg.LinAlgError:
-                print("lnono shape:", lnono.shape)
-                print("symmetry error:", np.linalg.norm(lnono - lnono.T))
-                w, _ = np.linalg.eig(lnono)
-                print("eigs min:", w.min())
-                raise
+            lnono_inv = np.linalg.inv(lnono)
 
-            # concat RHS
-            rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
-            # cho_solve:  lnono_j * X = rhs_j
-            X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
-            X_lam = X[:, :lnoo.shape[1]]
-            X_eta = X[:, -1]
-
-            new_message_lam = loo - lono @ X_lam
-            new_message_eta = eo  - lono @ X_eta
+            new_message_lam = loo - lono @ lnono_inv @ lnoo
             messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
+            new_message_eta = eo - lono @ lnono_inv @ eno
             messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
 
 
