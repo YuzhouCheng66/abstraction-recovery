@@ -7,6 +7,8 @@ import time
 import scipy.linalg
 from utils.gaussian import NdimGaussian
 from utils.distances import bhattacharyya, mahalanobis
+from collections import deque
+import heapq
 
 #from amg import classes as amg_cls
 #from amg import functions as amg_fnc
@@ -32,7 +34,7 @@ class FactorGraph:
 
         self.eta_damping = eta_damping
 
-        self.Q = []
+        self.Q = deque()
         self.b_wild = False
         self.wild_thresh = wild_thresh
         self.multigrid_vars = [[]]
@@ -218,7 +220,6 @@ class FactorGraph:
             self.relinearise_factors(factors)
 
         self.compute_all_messages(factors, local_relin=local_relin)
-        time.sleep(1e-9)
         self.update_all_beliefs(vars)
 
     def synchronous_smooth(self, level=None, local_relin=True, robustify=False):
@@ -322,58 +323,190 @@ class FactorGraph:
                 vis.pause_event.set()
                 vis.skip_event.clear()
 
-    def wildfire_iteration(self, vis, local_relin=True, robustify=False):
-        breakout_count = 0
-        i = 0
-        while not vis.reset_event.isSet():
-            if vis.pause_event.isSet() and not vis.reset_event.isSet() or not self.Q:
-                time.sleep(0.1)
-                _ , new_factors = self.visualisation_sync(vis)
-                if new_factors:
-                    self.Q = new_factors
-            else:
-                _ , new_factors = self.visualisation_sync(vis)
-                if new_factors:
-                    self.Q[0:0] = new_factors
+    def wildfire_iteration(self, local_relin=True, robustify=False):
+        if len(self.Q) == 0:
+            self.Q.append(self.factors[0]) 
+            self.factors[0].in_queue = True
 
-                self.Q[0].compute_messages(self.eta_damping)
-                self.n_msgs += 2
+        for i in range(len(self.factors)):
+            self.Q[0].compute_messages(self.eta_damping)
 
-                for count, var in enumerate(self.Q[0].adj_var_nodes):
-                    var.update_belief()
-                    var.compute_residual()
-                    breakout_count += 1
-                    if any(self.Q[0].messages_dist[count] > self.wild_thresh):
-                        for f in var.adj_factors:
-                            if f not in self.Q:
-                                self.Q.append(f)
+            for var in self.Q[0].adj_var_nodes:
+                var.update_belief()
+                #if any(self.Q[0].messages_dist[count] >= self.wild_thresh):
 
-                self.Q.pop(0)
+                for f in var.adj_factors:
+                    if (not f.in_queue):
+                        f.in_queue = True
+                        self.Q.append(f)
 
-                if (self.n_msgs / 2) % len(self.factors) == 0:
-                    i += 1
-                    vis.read_event.clear()
-                    av_dist = np.mean(np.linalg.norm(np.array([var.mu - var.GT for var in self.var_nodes if var.type != "multigrid"]),axis=1))
-                    self.energy_history.append(self.energy())
-                    self.error_history.append(av_dist)
-                    self.nmsgs_history.append(self.n_msgs)
-                    print(f'Iteration {i}  // Energy {self.energy_history[-1]:.6f} // ' 
-                        f'Average error {av_dist:.4f} // msgs sent {self.n_msgs/1e6:.3f}x10^6')
-                    
-                    self.get_multigrid_stats()
-                    for level in range(len(self.n_active)):
-                        if self.n_active[level] > 0:
-                            print(f'Multigrid stats // level {level} // {(self.n_coarse[level]/(len(self.multigrid_vars[level])))*100:.2f}% coarse ' \
-                                f'// {(self.n_active[level]/(len(self.multigrid_vars[level])))*100:.2f}% active ' \
-                                f'// {len(self.multigrid_vars[level])} total ')
-                    
-                    print('')
+            self.Q[0].in_queue = False
+            self.Q.popleft()
 
-                    breakout_count = 0
 
-                    if vis.skip_event.isSet():
-                        vis.pause_event.set()
-                        vis.skip_event.clear()
+    def residual_iteration(self, local_relin=True, robustify=False):
+        """
+        Residual-based GBP iteration using a max-priority queue (stored in self.heapq).
+        """
+
+        # ---------- 默认参数 ----------
+        if not hasattr(self, "residual_beta"):
+            self.residual_beta = 1.0
+        if not hasattr(self, "residual_eps"):
+            self.residual_eps = 1e-6
+
+        # 每个 factor 的 residual
+        if not hasattr(self, "factor_residual"):
+            self.factor_residual = {}
+
+        # ---------- 初始化 self.heapq ----------
+        if not hasattr(self, "heapq"):
+            # ★★★ 就是你需要的初始化行 ★★★
+            self.heapq = []     # 这是 priority queue（min-heap，用负号实现 max-heap）
+
+        # 如果第一次运行，没有任何条目，那么加入所有 factor
+        if len(self.heapq) == 0:
+            for f in self.factors:
+                r0 = self.factor_residual.get(f, 1.0)  # 初始 residual = 1.0
+                self.factor_residual[f] = r0
+                heapq.heappush(self.heapq, (-r0, f.factorID, f))   # push into PQ (max-heap by negation)
+
+        # 每轮最多更新 N 个（和原 wildfire 一样）
+        max_updates = len(self.factors)
+        n_updates = 0
+
+        while self.heapq and n_updates < max_updates:
+
+            neg_r_f, _, f = heapq.heappop(self.heapq)
+            r_f = -neg_r_f
+
+            cur_r = self.factor_residual.get(f, 0.0)
+            if r_f < cur_r - 1e-12:
+                continue
+
+            if r_f < self.residual_eps:
+                break
+
+            # ===== 1. 更新 factor 的 messages =====
+            f.compute_messages(self.eta_damping)
+            self.factor_residual[f] = 0.0
+
+            # ===== 2. 变量 belief 更新 + 激活邻居因子 =====
+            for var in f.adj_var_nodes:
+                old_eta = np.array(var.belief.eta, copy=True)
+
+                var.update_belief()
+
+                new_eta = np.array(var.belief.eta)
+                delta = float(np.linalg.norm(new_eta - old_eta))  # 默认 2-norm
+
+                if delta <= 1e-12:
+                    continue
+
+                # 通知所有邻居 factor
+                for g in var.adj_factors:
+                    if g is f:
+                        continue
+
+                    est_r_g = self.residual_beta * delta
+                    old_r_g = self.factor_residual.get(g, 0.0)
+
+                    if est_r_g > old_r_g:
+                        self.factor_residual[g] = est_r_g
+                        heapq.heappush(self.heapq, (-est_r_g, g.factorID, g))
+
+            # ===== 3. 本 factor 的 residual =====
+            
+
+            n_updates += 1
+
+    def residual_iteration_var_heap(self):
+        """
+        Residual-based GBP iteration, priority queue on *variables*.
+
+        逻辑：
+        - 堆元素 = (-residual_v, varID, var)
+        residual_v = ||Δ eta_v||_2
+        - 每次选 residual 最大的 variable v：
+            对其所有邻居 factor f:
+                f.compute_messages(...)
+                对 f.adj_var_nodes 里的每个 u:
+                    更新 u.belief
+                    计算新的 residual_u，并丢回堆
+        """
+
+        # ---------- 默认参数 ----------
+        if not hasattr(self, "residual_eps"):
+            self.residual_eps = 1e-6       # 收敛阈值
+
+        # 记录每个 variable 当前 residual（用于 lazy / 过期判断）
+        if not hasattr(self, "var_residual"):
+            self.var_residual = {}
+
+        # priority queue 容器（min-heap，用负 priority 实现 max-heap）
+        if not hasattr(self, "var_heap"):
+            self.var_heap = []
+
+        # ---------- 初始化 var_heap ----------
+        if len(self.var_heap) == 0:
+            # NOTE: 这里用 self.var_nodes，换成你自己的变量列表名字
+            for v in self.var_nodes:
+                # 初始 residual 都设为 1.0，这样 tie 的时候按 varID 顺序
+                r0 = 1.0
+                self.var_residual[v] = r0
+                # 元素结构：(-residual, varID, var)
+                heapq.heappush(self.var_heap, (-r0, v.variableID, v))
+
+        
+        max_updates = len(self.var_nodes)
+        n_updates = 0
+
+        while n_updates < 1:
+            neg_r_v, _, v = heapq.heappop(self.var_heap)
+            r_v = -neg_r_v
+
+            # 当前记录的 residual
+            cur_r = self.var_residual.get(v, 0.0)
+
+            # 过期条目：只接受“和当前记录相等”的 entry，其余全部丢掉
+            if abs(r_v - cur_r) > 1e-12:
+                continue
+
+            # 当前最大 residual 已经很小：视为收敛，结束这一轮
+            if r_v < self.residual_eps:
+                break
+
+            #print(v)
+            # 更新 belief, 不确定是否必须
+            #v.update_belief()
+
+            # ===== 对 v 的邻居 factors 做一次“扩散” =====
+            for f in v.adj_factors:
+                # 一次 factor -> vars 的消息更新
+                f.compute_messages(self.eta_damping)
+
+                # 再对 f.adj_var_nodes 里的每个 variable u 更新 belief 和 residual
+                for u in f.adj_var_nodes:
+                    old_eta = np.array(u.belief.eta, copy=True)
+                    u.update_belief()
+                    new_eta = np.array(u.belief.eta)
+
+                    est_r_u = float(np.linalg.norm(new_eta - old_eta))
+                    #if u.variableID == 3:
+                        #print("est_r_u",est_r_u)
+                    old_r_u = self.var_residual.get(u, 0.0)
+
+                    # 只有当新的 residual 更大时才更新
+                    if est_r_u > old_r_u + 1e-12:
+                        self.var_residual[u] = est_r_u
+                        heapq.heappush(self.var_heap, (-est_r_u, u.variableID, u))
+
+
+            # 这个 variable 已经被“用来扩散过”，本轮里视为 residual 清零
+            self.var_residual[v] = 0.0
+
+            n_updates += 1
+            
 
     def visualisation_sync(self, vis):
         if vis.n_factors > self.n_factor_nodes:
@@ -611,8 +744,10 @@ class VariableNode:
         self.belief.eta = eta 
         self.belief.lam = lam
 
-        self.Sigma = np.linalg.inv(self.belief.lam)
-        self.mu = self.Sigma @ self.belief.eta
+        #c, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
+        #self.mu = scipy.linalg.cho_solve((c, lower), eta)            # solve Lam mu = eta
+        #self.Sigma = scipy.linalg.cho_solve((c, lower), np.eye(lam.shape[0]))  # 解 Lam Sigma = I
+
         
         # Send belief to adjacent factors
         for factor in self.adj_factors:
@@ -681,6 +816,13 @@ class VariableNode:
 
         return res
 
+    def __str__(self):
+        # print(obj) 时的显示
+        return f"{self.variableID}"
+
+    def __repr__(self):
+        # 在 list / dict / 交互式终端里显示
+        return f"VariableNode({self.variableID})"
 
 class Factor:
     def __init__(self,
@@ -711,6 +853,7 @@ class Factor:
         self.active = True
 
         self.level = 0
+        self.in_queue = False
 
         self.type = "factor"
 
@@ -952,7 +1095,91 @@ class Factor:
 
         #time.sleep(0.00000001)
 
+
+    def compute_messages_from_v(self, v, eta_damping):
+        """
+            Compute all outgoing messages from the factor.
+            This is specialised for one and two variable factors.
+        """
+
+        if len(self.adj_vIDs) == 1:
+            v = 0
+            if self.b_calc_mess_dist:
+                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
+            self.messages[v].eta = self.factor.eta.copy()
+            self.messages[v].lam = self.factor.lam.copy()
+            return
         
+        
+        if self.type[0:5] == "multi":
+            eta_damping = eta_damping
+        messages_eta, messages_lam = [], []
+
+
+        for v in range(len(self.adj_vIDs)):
+            eta_factor, lam_factor = self.factor.eta.copy(), self.factor.lam.copy()
+
+            # Take product of factor with incoming messages
+            mess_start_dim = 0
+            for var in range(len(self.adj_vIDs)):
+                if var != v:
+                    var_dofs = self.adj_var_nodes[var].dofs
+                    eta_factor[mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].eta - self.messages[var].eta
+                    lam_factor[mess_start_dim:mess_start_dim + var_dofs, mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].lam - self.messages[var].lam
+                mess_start_dim += self.adj_var_nodes[var].dofs
+
+            # Divide up parameters of distribution
+            divide =  self.adj_var_nodes[0].dofs
+            if v == 0:
+                eo = eta_factor[:divide]
+                eno = eta_factor[divide:]
+
+                loo = lam_factor[:divide, :divide]
+                lono = lam_factor[:divide, divide:]
+                lnoo = lam_factor[divide:, :divide]
+                lnono = lam_factor[divide:, divide:]
+            elif v == 1:
+                eo = eta_factor[divide:]
+                eno = eta_factor[:divide]
+
+                loo = lam_factor[divide:, divide:]
+                lono = lam_factor[divide:, :divide]
+                lnoo = lam_factor[:divide, divide:]
+                lnono = lam_factor[:divide, :divide]
+
+            lnono += 1e-12 * np.eye(lnono.shape[0])
+            
+            try:
+                L = np.linalg.cholesky(lnono)
+            except np.linalg.LinAlgError:
+                print("lnono shape:", lnono.shape)
+                print("symmetry error:", np.linalg.norm(lnono - lnono.T))
+                w, _ = np.linalg.eig(lnono)
+                print("eigs min:", w.min())
+                raise
+
+            # concat RHS
+            rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
+            # cho_solve:  lnono_j * X = rhs_j
+            X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
+            X_lam = X[:, :lnoo.shape[1]]
+            X_eta = X[:, -1]
+
+            new_message_lam = loo - lono @ X_lam
+            new_message_eta = eo  - lono @ X_eta
+            messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
+            messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
+
+
+        for v in range(len(self.adj_vIDs)):
+            #self.messages_dist[v] = bhattacharyya(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
+            if self.b_calc_mess_dist:
+                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
+            self.messages[v].lam = messages_lam[v]
+            self.messages[v].eta = messages_eta[v]
+
+
+        #time.sleep(0.00000001)    
 
     def smoothing_compute_messages(self, eta_damping):
 
@@ -998,3 +1225,12 @@ class Factor:
             #self.adj_var_nodes[1-v].update_smooth_belief()
 
         #time.sleep(0.00000001)
+
+
+    def __str__(self):
+        # print(f) 时显示
+        return f"{self.factorID}"
+
+    def __repr__(self):
+        # 在 list / dict / debugger 里显示
+        return f"Factor({self.factorID})"
