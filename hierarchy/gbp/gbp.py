@@ -48,6 +48,11 @@ class FactorGraph:
         self.nmsgs_history = []
         self.mus = []
 
+        self.residual_eps = 1e-6
+        self.var_residual = {}
+        self.var_heap = []
+
+
         if nonlinear_factors:
             # For linearising nonlinear measurement factors.
             self.beta = beta  # Threshold change in mean of adjacent beliefs for relinearisation.
@@ -435,33 +440,19 @@ class FactorGraph:
                     计算新的 residual_u，并丢回堆
         """
 
-        # ---------- 默认参数 ----------
-        if not hasattr(self, "residual_eps"):
-            self.residual_eps = 1e-6       # 收敛阈值
-
-        # 记录每个 variable 当前 residual（用于 lazy / 过期判断）
-        if not hasattr(self, "var_residual"):
-            self.var_residual = {}
-
-        # priority queue 容器（min-heap，用负 priority 实现 max-heap）
-        if not hasattr(self, "var_heap"):
-            self.var_heap = []
-
         # ---------- 初始化 var_heap ----------
         if len(self.var_heap) == 0:
             # NOTE: 这里用 self.var_nodes，换成你自己的变量列表名字
             for v in self.var_nodes:
-                # 初始 residual 都设为 1.0，这样 tie 的时候按 varID 顺序
-                r0 = 1.0
+                # 初始 residual 都设为 0，这样 tie 的时候按 varID 顺序
+                r0 = 0
                 self.var_residual[v] = r0
                 # 元素结构：(-residual, varID, var)
                 heapq.heappush(self.var_heap, (-r0, v.variableID, v))
 
         
-        max_updates = len(self.var_nodes)
         n_updates = 0
-
-        while n_updates < 1:
+        while n_updates < len(self.var_nodes):
             neg_r_v, _, v = heapq.heappop(self.var_heap)
             r_v = -neg_r_v
 
@@ -471,14 +462,6 @@ class FactorGraph:
             # 过期条目：只接受“和当前记录相等”的 entry，其余全部丢掉
             if abs(r_v - cur_r) > 1e-12:
                 continue
-
-            # 当前最大 residual 已经很小：视为收敛，结束这一轮
-            if r_v < self.residual_eps:
-                break
-
-            #print(v)
-            # 更新 belief, 不确定是否必须
-            #v.update_belief()
 
             # ===== 对 v 的邻居 factors 做一次“扩散” =====
             for f in v.adj_factors:
@@ -492,8 +475,6 @@ class FactorGraph:
                     new_eta = np.array(u.belief.eta)
 
                     est_r_u = float(np.linalg.norm(new_eta - old_eta))
-                    #if u.variableID == 3:
-                        #print("est_r_u",est_r_u)
                     old_r_u = self.var_residual.get(u, 0.0)
 
                     # 只有当新的 residual 更大时才更新
@@ -501,10 +482,8 @@ class FactorGraph:
                         self.var_residual[u] = est_r_u
                         heapq.heappush(self.var_heap, (-est_r_u, u.variableID, u))
 
-
             # 这个 variable 已经被“用来扩散过”，本轮里视为 residual 清零
             self.var_residual[v] = 0.0
-
             n_updates += 1
             
 
@@ -744,11 +723,10 @@ class VariableNode:
         self.belief.eta = eta 
         self.belief.lam = lam
 
-        #c, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
-        #self.mu = scipy.linalg.cho_solve((c, lower), eta)            # solve Lam mu = eta
-        #self.Sigma = scipy.linalg.cho_solve((c, lower), np.eye(lam.shape[0]))  # 解 Lam Sigma = I
+        c, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
+        self.mu = scipy.linalg.cho_solve((c, lower), eta)            # solve Lam mu = eta
+        self.Sigma = scipy.linalg.cho_solve((c, lower), np.eye(lam.shape[0]))  # 解 Lam Sigma = I
 
-        
         # Send belief to adjacent factors
         for factor in self.adj_factors:
             belief_ix = factor.adj_var_nodes.index(self)
@@ -951,6 +929,7 @@ class Factor:
         pred_measurement = self.meas_fn(self.linpoint, *self.args)
         lambda_factor = np.zeros_like(self.factor.lam)
         eta_factor = np.zeros_like(self.factor.eta)
+        
         for i in range(len(J)):
             lambda_factor += J[i].T @ self.measurement_lambda[i] @ J[i]
             eta_factor += J[i].T @ (self.measurement_lambda[i] @ (J[i] @ self.linpoint + self.measurement[i] - pred_measurement[i]))
@@ -1017,16 +996,15 @@ class Factor:
         """
 
         if len(self.adj_vIDs) == 1:
-            v = 0
-            if self.b_calc_mess_dist:
-                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            self.messages[v].eta = self.factor.eta.copy()
-            self.messages[v].lam = self.factor.lam.copy()
+            #if self.b_calc_mess_dist:
+            #    self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
+            self.messages[0].eta = self.factor.eta.copy()
+            self.messages[0].lam = self.factor.lam.copy()
             return
         
         
-        if self.type[0:5] == "multi":
-            eta_damping = eta_damping
+        #if self.type[0:5] == "multi":
+        #    eta_damping = eta_damping
         messages_eta, messages_lam = [], []
 
 
@@ -1063,15 +1041,7 @@ class Factor:
 
             lnono += 1e-12 * np.eye(lnono.shape[0])
             
-            try:
-                L = np.linalg.cholesky(lnono)
-            except np.linalg.LinAlgError:
-                print("lnono shape:", lnono.shape)
-                print("symmetry error:", np.linalg.norm(lnono - lnono.T))
-                w, _ = np.linalg.eig(lnono)
-                print("eigs min:", w.min())
-                raise
-
+            L = np.linalg.cholesky(lnono)
             # concat RHS
             rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
             # cho_solve:  lnono_j * X = rhs_j
@@ -1087,8 +1057,8 @@ class Factor:
 
         for v in range(len(self.adj_vIDs)):
             #self.messages_dist[v] = bhattacharyya(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            if self.b_calc_mess_dist:
-                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
+            #if self.b_calc_mess_dist:
+            #    self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
             self.messages[v].lam = messages_lam[v]
             self.messages[v].eta = messages_eta[v]
 
@@ -1104,86 +1074,63 @@ class Factor:
 
         if len(self.adj_vIDs) == 1:
             v = 0
-            if self.b_calc_mess_dist:
-                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
             self.messages[v].eta = self.factor.eta.copy()
             self.messages[v].lam = self.factor.lam.copy()
             return
         
+        eta_factor, lam_factor = self.factor.eta.copy(), self.factor.lam.copy()
+        # Take product of factor with incoming messages
+        mess_start_dim = 0
+        # Divide up parameters of distribution
+        divide = self.adj_var_nodes[0].dofs
         
-        if self.type[0:5] == "multi":
-            eta_damping = eta_damping
-        messages_eta, messages_lam = [], []
+        if v == 1:
+            u = 0
+            mess_start_dim = self.adj_var_nodes[0].dofs
+            var_dofs = self.adj_var_nodes[1].dofs
+            eta_factor[mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[1].eta - self.messages[1].eta
+            lam_factor[mess_start_dim:mess_start_dim + var_dofs, mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[1].lam - self.messages[1].lam
 
+            eo = eta_factor[:divide]
+            eno = eta_factor[divide:]
 
-        for v in range(len(self.adj_vIDs)):
-            eta_factor, lam_factor = self.factor.eta.copy(), self.factor.lam.copy()
+            loo = lam_factor[:divide, :divide]
+            lono = lam_factor[:divide, divide:]
+            lnoo = lam_factor[divide:, :divide]
+            lnono = lam_factor[divide:, divide:]
 
-            # Take product of factor with incoming messages
+        elif v == 0:
+            u = 1
             mess_start_dim = 0
-            for var in range(len(self.adj_vIDs)):
-                if var != v:
-                    var_dofs = self.adj_var_nodes[var].dofs
-                    eta_factor[mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].eta - self.messages[var].eta
-                    lam_factor[mess_start_dim:mess_start_dim + var_dofs, mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].lam - self.messages[var].lam
-                mess_start_dim += self.adj_var_nodes[var].dofs
+            var_dofs = self.adj_var_nodes[0].dofs
+            eta_factor[mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[0].eta - self.messages[0].eta
+            lam_factor[mess_start_dim:mess_start_dim + var_dofs, mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[0].lam - self.messages[0].lam
 
-            # Divide up parameters of distribution
-            divide =  self.adj_var_nodes[0].dofs
-            if v == 0:
-                eo = eta_factor[:divide]
-                eno = eta_factor[divide:]
+            eo = eta_factor[divide:]
+            eno = eta_factor[:divide]
 
-                loo = lam_factor[:divide, :divide]
-                lono = lam_factor[:divide, divide:]
-                lnoo = lam_factor[divide:, :divide]
-                lnono = lam_factor[divide:, divide:]
-            elif v == 1:
-                eo = eta_factor[divide:]
-                eno = eta_factor[:divide]
+            loo = lam_factor[divide:, divide:]
+            lono = lam_factor[divide:, :divide]
+            lnoo = lam_factor[:divide, divide:]
+            lnono = lam_factor[:divide, :divide]
 
-                loo = lam_factor[divide:, divide:]
-                lono = lam_factor[divide:, :divide]
-                lnoo = lam_factor[:divide, divide:]
-                lnono = lam_factor[:divide, :divide]
+        lnono += 1e-12 * np.eye(lnono.shape[0])
+        L = np.linalg.cholesky(lnono)
 
-            lnono += 1e-12 * np.eye(lnono.shape[0])
-            
-            try:
-                L = np.linalg.cholesky(lnono)
-            except np.linalg.LinAlgError:
-                print("lnono shape:", lnono.shape)
-                print("symmetry error:", np.linalg.norm(lnono - lnono.T))
-                w, _ = np.linalg.eig(lnono)
-                print("eigs min:", w.min())
-                raise
+        # concat RHS
+        rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
+        # cho_solve:  lnono_j * X = rhs_j
+        X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
+        X_lam = X[:, :lnoo.shape[1]]
+        X_eta = X[:, -1]
 
-            # concat RHS
-            rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
-            # cho_solve:  lnono_j * X = rhs_j
-            X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
-            X_lam = X[:, :lnoo.shape[1]]
-            X_eta = X[:, -1]
-
-            new_message_lam = loo - lono @ X_lam
-            new_message_eta = eo  - lono @ X_eta
-            messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
-            messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
-
-
-        for v in range(len(self.adj_vIDs)):
-            #self.messages_dist[v] = bhattacharyya(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            if self.b_calc_mess_dist:
-                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            self.messages[v].lam = messages_lam[v]
-            self.messages[v].eta = messages_eta[v]
-
-
+        new_message_lam = loo - lono @ X_lam
+        new_message_eta = eo  - lono @ X_eta
+        self.messages[u].lam = (1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam
+        self.messages[u].eta = (1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta
         #time.sleep(0.00000001)    
 
     def smoothing_compute_messages(self, eta_damping):
-
-
         for v in range(len(self.adj_vIDs)):
             # Pii = np.array([self.adj_var_nodes[v].prior.lam[0,0], self.adj_var_nodes[v].prior.lam[1,1]])
             # uii = self.adj_var_nodes[v].prior.eta / Pii
