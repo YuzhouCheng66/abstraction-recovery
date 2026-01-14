@@ -1,38 +1,74 @@
+// test_large_scale_slam.cpp
+
 #include <iostream>
 #include <iomanip>
 #include <vector>
 #include <cmath>
 #include <chrono>
-#include <Eigen/Dense>
-#include "slam/SlamGraph.h"
-#include "slam/SlamFactorGraph.h"
+#include <algorithm>
+#include <stdexcept>
 
-/**
- * Compute energy map (sum of squared distances from ground truth)
- * 
- * Energy = 0.5 * sum_i ||mu_i - GT_i||^2
- */
-double energyMap(const slam::SimpleFactorGraph& graph, bool include_priors = true, bool include_factors = true) {
+#include <Eigen/Dense>
+
+#include "slam/SlamGraph.h"
+#include "slam/SlamFactorGraph.h"   // buildNoisyPoseGraph returns gbp::FactorGraph now
+#include "gbp/FactorGraph.h"
+
+// ---- proxy energy: 0.5 * sum ||mu_i - GT_i||^2 ----
+static double energyMapFromGraphMu(const gbp::FactorGraph& graph) {
     double total = 0.0;
-    
-    for (const auto& v : graph.var_nodes) {
-        if (v->dim < 2) continue;
-        
-        // Extract 2D position
-        Eigen::Vector2d gt = v->GT.head(2);
-        Eigen::Vector2d mu = v->mu.head(2);
-        Eigen::Vector2d residual = mu - gt;
-        
-        total += 0.5 * residual.dot(residual);
+
+    for (const auto& vptr : graph.var_nodes) {
+        if (!vptr) continue;
+        const auto& v = *vptr;
+        if (v.dofs < 2) continue;
+
+        Eigen::Vector2d gt = v.GT.head(2);
+        Eigen::Vector2d mu = v.mu.head(2);
+        Eigen::Vector2d r  = mu - gt;
+        total += 0.5 * r.dot(r);
     }
-    
+
+    return total;
+}
+
+// ---- same proxy energy, but using externally provided stacked mu (MAP solution) ----
+// IMPORTANT: we do NOT assume off = 2*id. We use var_ix from jointDistributionInfSparse.
+static double energyMapFromStackedMu(
+    const gbp::FactorGraph& graph,
+    const Eigen::VectorXd& mu_stacked,
+    const std::vector<int>& var_ix)
+{
+    double total = 0.0;
+
+    for (const auto& vptr : graph.var_nodes) {
+        if (!vptr) continue;
+        const auto& v = *vptr;
+        if (v.dofs < 2) continue;
+
+        const int id = v.variableID;
+        if (id < 0 || id >= (int)var_ix.size() || var_ix[id] < 0) {
+            throw std::runtime_error("energyMapFromStackedMu: missing var_ix for variableID");
+        }
+
+        const int off = var_ix[id];
+        if (off + v.dofs > mu_stacked.size()) {
+            throw std::runtime_error("energyMapFromStackedMu: mu_stacked too small for var offset");
+        }
+
+        Eigen::Vector2d gt = v.GT.head(2);
+        Eigen::Vector2d mu = mu_stacked.segment(off, 2);
+        Eigen::Vector2d r  = mu - gt;
+        total += 0.5 * r.dot(r);
+    }
+
     return total;
 }
 
 int main() {
     std::cout << "=== Large-Scale SLAM Graph Convergence Test ===\n\n";
-    
-    // Test parameters
+
+    // ---------------- parameters ----------------
     const int N = 5000;
     const double step = 25.0;
     const double prob = 0.05;
@@ -41,7 +77,7 @@ int main() {
     const double prior_sigma = 1.0;
     const double odom_sigma = 1.0;
     const unsigned int seed = 2001;
-    
+
     std::cout << "Parameters:\n";
     std::cout << "  N (nodes): " << N << "\n";
     std::cout << "  step_size: " << step << "\n";
@@ -51,213 +87,175 @@ int main() {
     std::cout << "  prior_sigma: " << prior_sigma << "\n";
     std::cout << "  odom_sigma: " << odom_sigma << "\n";
     std::cout << "  seed: " << seed << "\n\n";
-    
-    // ============ Step 1: Generate SLAM graph ============
+
+    // ---------------- Step 1: build SlamGraph ----------------
     std::cout << "Step 1: Generating SLAM-like graph with " << N << " nodes...\n";
-    auto start = std::chrono::high_resolution_clock::now();
-    
+    auto t0 = std::chrono::high_resolution_clock::now();
+
     slam::SlamGraph graph = slam::makeSlamLikeGraph(
-        N,           // N nodes
-        step,        // step_size
-        prob,        // loop_prob
-        radius,      // loop_radius
-        prior_prop,  // prior_prop
-        seed,        // seed
-        true         // use_seed
+        N, step, prob, radius, prior_prop, seed, true
     );
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
     std::cout << "  ✓ Generated " << graph.numNodes() << " nodes and " << graph.numEdges() << " edges\n";
-    std::cout << "  Time: " << duration.count() << " ms\n\n";
-    
-    // ============ Step 2: Build noisy pose graph ============
+    std::cout << "  Time: " << ms << " ms\n\n";
+
+    // ---------------- Step 2: build gbp::FactorGraph ----------------
     std::cout << "Step 2: Building noisy pose graph...\n";
-    std::cout << "  Generating noise cache...\n";
-    start = std::chrono::high_resolution_clock::now();
-    
+    t0 = std::chrono::high_resolution_clock::now();
+
     slam::NoiseConfig config;
     config.prior_sigma = prior_sigma;
-    config.odom_sigma = odom_sigma;
-    config.tiny_prior = 1e-12;
-    config.seed = seed;
-    config.use_seed = true;
-    
-    std::cout << "  Creating " << graph.numEdges() << " factors...\n";
+    config.odom_sigma  = odom_sigma;
+    config.tiny_prior  = 1e-12;
+    config.seed        = seed;
+    config.use_seed    = true;
+
+    std::cout << "  Creating factors from " << graph.numEdges() << " edges...\n";
     std::cout.flush();
-    
-    slam::SimpleFactorGraph gbp_graph = slam::buildNoisyPoseGraph(
-        graph.nodes,
-        graph.edges,
-        config
-    );
-    
-    end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "  ✓ Built factor graph with " << gbp_graph.getNumNodes() << " variables\n";
-    std::cout << "    and " << gbp_graph.getNumFactors() << " factors\n";
-    std::cout << "  Time: " << duration.count() << " ms\n\n";
-    
-    // ============ Step 3: Initialize beliefs ============
+
+    // IMPORTANT: buildNoisyPoseGraph now returns gbp::FactorGraph
+    gbp::FactorGraph gbp_graph = slam::buildNoisyPoseGraph(graph.nodes, graph.edges, config);
+
+    t1 = std::chrono::high_resolution_clock::now();
+    ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    std::cout << "  ✓ Built factor graph with " << gbp_graph.var_nodes.size() << " variables\n";
+    std::cout << "    and " << gbp_graph.factors.size() << " factors\n";
+    std::cout << "  Time: " << ms << " ms\n\n";
+
+    // ---------------- Step 3: init beliefs (Python style) ----------------
     std::cout << "Step 3: Initializing beliefs...\n";
-    
-    // Debug: print first factor details
-    if (!gbp_graph.factors.empty()) {
-        const auto& f = gbp_graph.factors[0];
-        std::cout << "  Factor 0: lam shape " << f->factor.lam().rows() << "x" << f->factor.lam().cols()
-                  << ", eta norm = " << f->factor.eta().norm() << "\n";
-    }
-    
-    // Do one iteration of message passing to bootstrap beliefs from factors
-    std::cout << "  Computing initial messages...\n";
-    
-    // CRITICAL: Initialize variable beliefs from their priors
-    for (auto& v : gbp_graph.var_nodes) {
-        v->belief = v->prior;
-        // mu will be set by Schur solve, but for initialization with singular lam, use prior eta direction
-        if (v->prior.lam().norm() > 0) {
-            // Try to compute mu from prior (will be zero if prior is tiny)
-            Eigen::MatrixXd lam = v->prior.lam();
+
+    for (auto& vptr : gbp_graph.var_nodes) {
+        if (!vptr) continue;
+        auto& v = *vptr;
+
+        v.belief = v.prior;
+
+        // Optional: initialize mu from prior (debug only)
+        Eigen::MatrixXd lam = v.prior.lam();
+        if (lam.size() > 0) {
             lam.diagonal().array() += 1e-12;
             Eigen::LLT<Eigen::MatrixXd> llt(lam);
-            v->mu = llt.solve(v->prior.eta());
+            if (llt.info() == Eigen::Success) v.mu = llt.solve(v.prior.eta());
+            else v.mu.setZero();
         } else {
-            v->mu.setZero();
+            v.mu.setZero();
         }
     }
-    
-    // Synchronize adj_beliefs from variables (priors ONLY, not cumulative beliefs)
-    for (auto& f : gbp_graph.factors) {
-        f->syncAdjBeliefsFromVariables();
-    }
-    
-    // Now compute messages with adj_beliefs initialized from priors only
-    for (auto& f : gbp_graph.factors) {
-        f->computeMessages(0.0);  // Compute messages without damping
-    }
-    for (auto& v : gbp_graph.var_nodes) {
-        v->updateBelief();
-    }
-    for (auto& v : gbp_graph.var_nodes) {
-        v->sendBeliefToFactors();  // Send beliefs to factors for next iteration
-    }
-    
+
+    // make factor-side adj_beliefs consistent once
+    gbp_graph.syncAllFactorAdjBeliefs();
+
     std::cout << "  ✓ Initialized\n\n";
-    
-    // ============ Step 4: Run optimization iterations ============
-    std::cout << "Step 4: Running GBP iterations with eta_damping = 0.4...\n";
+
+    // ---------------- Step 3.5: Batch MAP baseline (sparse) ----------------
+    std::cout << "Step 3.5: Computing batch MAP (sparse) baseline...\n";
+    t0 = std::chrono::high_resolution_clock::now();
+
+    // (A) get var_ix mapping consistent with how jointMAPSparse stacks variables
+    auto J = gbp_graph.jointDistributionInfSparse();
+
+    // (B) solve for global MAP
+    Eigen::VectorXd mu_opt = gbp_graph.jointMAPSparse(1e-12);
+
+    // (C) compute GT proxy energy for the batch MAP
+    double e_opt = energyMapFromStackedMu(gbp_graph, mu_opt, J.var_ix);
+
+    t1 = std::chrono::high_resolution_clock::now();
+    ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    std::cout << "  ✓ Batch MAP computed\n";
+    std::cout << "  Batch-MAP proxy energy (vs GT): " << std::fixed << std::setprecision(6) << e_opt << "\n";
+    std::cout << "  Time: " << ms << " ms\n\n";
+
+    // ---------------- Step 4: run GBP iterations ----------------
+    gbp_graph.eta_damping = 0.0;  // match你的当前实验设置
+    std::cout << "Step 4: Running GBP iterations with eta_damping = " << gbp_graph.eta_damping << "...\n";
     std::cout << "  Target: Convergence (energy change < 1e-2 for 2 consecutive iterations)\n\n";
-    
-    // Debug: check first variable after initialization
-    if (!gbp_graph.var_nodes.empty()) {
-        const auto& v1 = gbp_graph.var_nodes[1];
-        std::cout << "  Before Iter 1: Node 1\n";
-        std::cout << "    belief eta norm = " << v1->belief.eta().norm()
-                  << ", belief lam norm = " << v1->belief.lam().norm() << "\n";
-        std::cout << "    mu = (" << v1->mu(0) << ", " << v1->mu(1) << ")\n";
-        std::cout << "    prior eta norm = " << v1->prior.eta().norm()
-                  << ", prior lam norm = " << v1->prior.lam().norm() << "\n";
-        
-        // Check message from first factor to node 1
-        if (v1->adj_factors.size() > 0) {
-            const auto& msg = v1->adj_factors[0].factor->messages[v1->adj_factors[0].local_idx];
-            std::cout << "    First message eta norm = " << msg.eta().norm()
-                      << ", msg lam norm = " << msg.lam().norm() << "\n";
-        }
-    }
-    
-    double energy_prev = energyMap(gbp_graph);
+
+    double e_prev = energyMapFromGraphMu(gbp_graph);
+
     std::cout << std::fixed << std::setprecision(6);
-    std::cout << "Initial energy: " << energy_prev << "\n\n";
-    
+    std::cout << "Initial GBP proxy energy: " << e_prev
+              << " | gap to batch-MAP: " << (e_prev - e_opt) << "\n\n";
+
     int counter = 0;
     const int max_iters = 2000;
-    const double energy_threshold = 1e-2;
-    const int convergence_patience = 2;
-    
-    start = std::chrono::high_resolution_clock::now();
-    
+    const double thr = 1e-2;
+    const int patience = 2;
+
+
+    t0 = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> sync_total(0);
+    int sync_iters = 0;
+
     for (int it = 0; it < max_iters; ++it) {
+        auto sync_start = std::chrono::high_resolution_clock::now();
         gbp_graph.synchronousIteration();
-        
-        double energy = energyMap(gbp_graph);
-        double delta_energy = std::abs(energy_prev - energy);
-        
-        // Debug output after iter 1 and 2
-        if (it < 2) {
-            const auto& v1 = gbp_graph.var_nodes[1];
-            std::cout << "\nAfter Iter " << (it + 1) << ":\n";
-            std::cout << "  Node 1 GT = (" << v1->GT(0) << ", " << v1->GT(1) << ")\n";
-            std::cout << "  Node 1 mu = (" << v1->mu(0) << ", " << v1->mu(1) << ")\n";
-            std::cout << "  Node 1 belief.eta = (" << v1->belief.eta()(0) << ", " 
-                      << v1->belief.eta()(1) << ")\n";
-            std::cout << "  Node 1 belief.lam.norm = " << v1->belief.lam().norm() << "\n";
-            std::cout << "  Node 1 belief.lam diagonal = (" << v1->belief.lam()(0,0) 
-                      << ", " << v1->belief.lam()(1,1) << ")\n";
-            
-            // Check factors connected to v1
-            if (v1->adj_factors.size() > 0) {
-                const auto& aref = v1->adj_factors[0];
-                const auto& factor = aref.factor;
-                std::cout << "  First factor to Node 1:\n";
-                std::cout << "    factor.lam.norm = " << factor->factor.lam().norm() << "\n";
-                std::cout << "    msg.eta = (" << factor->messages[aref.local_idx].eta()(0) 
-                          << ", " << factor->messages[aref.local_idx].eta()(1) << ")\n";
-                std::cout << "    msg.lam.norm = " << factor->messages[aref.local_idx].lam().norm() << "\n";
-            }
-            std::cout.flush();
+        auto sync_end = std::chrono::high_resolution_clock::now();
+        sync_total += (sync_end - sync_start);
+        ++sync_iters;
+
+        double e = energyMapFromGraphMu(gbp_graph);
+        double de = std::abs(e_prev - e);
+
+        if ((it + 1) % 10 == 0 || it < 20) {
+            std::cout << "Iter " << std::setw(4) << (it + 1)
+                      << " | Energy = " << std::setw(12) << e
+                      << " | ΔE = " << std::scientific << std::setprecision(3) << de
+                      << std::fixed << std::setprecision(6)
+                      << " | gap_to_MAP = " << (e - e_opt) << "\n";
         }
-        
-        // Print every iteration (or less frequently for large graphs)
-        if ((it + 1) % 10 == 0 || it < 50) {
-            std::cout << "Iter " << std::setw(4) << (it + 1) 
-                      << " | Energy = " << std::setw(12) << energy 
-                      << " | ΔE = " << std::scientific << std::setprecision(3) << delta_energy 
-                      << std::fixed << std::setprecision(6) << "\n";
-        }
-        
-        // Check for convergence
-        if (delta_energy < energy_threshold) {
+
+        if (de < thr) {
             counter++;
-            if (counter >= convergence_patience) {
-                std::cout << "\n✓ CONVERGED at iteration " << (it + 1) 
-                          << " with energy = " << energy << "\n";
+            if (counter >= patience) {
+                std::cout << "\n✓ CONVERGED at iteration " << (it + 1)
+                          << " with GBP proxy energy = " << e
+                          << " | gap_to_MAP = " << (e - e_opt) << "\n";
                 break;
             }
         } else {
-            counter = 0;  // Reset counter if energy change is significant
+            counter = 0;
         }
-        
-        energy_prev = energy;
+
+        e_prev = e;
     }
-    
-    end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "\nOptimization time: " << duration.count() << " ms\n";
-    
-    // ============ Step 5: Final statistics ============
+
+    t1 = std::chrono::high_resolution_clock::now();
+    ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "\nOptimization time: " << ms << " ms\n";
+    if (sync_iters > 0) {
+        double avg_sync_ms = 1000.0 * sync_total.count() / sync_iters;
+        std::cout << "Average synchronousIteration() time per iter: " << avg_sync_ms << " ms\n";
+    }
+
+    // ---------------- Step 5: final report ----------------
     std::cout << "\n=== Final Statistics ===\n";
-    double final_energy = energyMap(gbp_graph);
-    std::cout << "Final energy: " << final_energy << "\n";
-    
-    // Sample some final estimates
+    double e_final = energyMapFromGraphMu(gbp_graph);
+    std::cout << "Final GBP proxy energy: " << e_final << "\n";
+    std::cout << "Batch-MAP proxy energy: " << e_opt << "\n";
+    std::cout << "Final gap (GBP - MAP): " << (e_final - e_opt) << "\n";
+
     std::cout << "\nSample final estimates (first 5 nodes):\n";
-    for (int i = 0; i < std::min(5, gbp_graph.getNumNodes()); ++i) {
-        const auto& v = gbp_graph.var_nodes[i];
-        Eigen::Vector2d gt = v->GT.head(2);
-        Eigen::Vector2d mu = v->mu.head(2);
+    for (int i = 0; i < std::min(5, (int)gbp_graph.var_nodes.size()); ++i) {
+        if (!gbp_graph.var_nodes[i]) continue;
+        const auto& v = *gbp_graph.var_nodes[i];
+
+        Eigen::Vector2d gt = v.GT.head(2);
+        Eigen::Vector2d mu = v.mu.head(2);
         Eigen::Vector2d err = mu - gt;
-        
-        std::cout << "  Node " << std::setw(4) << i 
+
+        std::cout << "  Node " << std::setw(4) << i
                   << " | GT = (" << std::setw(8) << gt.x() << ", " << std::setw(8) << gt.y() << ")"
                   << " | Est = (" << std::setw(8) << mu.x() << ", " << std::setw(8) << mu.y() << ")"
                   << " | Err = " << std::scientific << std::setprecision(2) << err.norm() << "\n";
     }
-    
+
     std::cout << "\n=== Test Complete ===\n";
-    
     return 0;
 }

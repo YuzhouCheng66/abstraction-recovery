@@ -1,10 +1,6 @@
 C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/ndim_gaussian.dir
 C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/slam_graph.dir
-C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_gaussian.dir
-C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_gbp.dir
-C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_slam_graph.dir
 C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_large_scale_slam.dir
-C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_small_slam.dir
-C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_anchor_factor.dir
+C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/test_hierarchy_gbp.dir
 C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/ALL_BUILD.dir
 C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/ZERO_CHECK.dir

@@ -26,7 +26,7 @@ events:
       用于 .NET Framework 的 Microsoft (R) 生成引擎版本 16.11.2+f32259642
       版权所有(C) Microsoft Corporation。保留所有权利。
       
-      生成启动时间为 2026/1/12 12:22:51。
+      生成启动时间为 2026/1/12 20:13:55。
       节点 1 上的项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\3.27.7\\CompilerIdCXX\\CompilerIdCXX.vcxproj”(默认目标)。
       PrepareForBuild:
         正在创建目录“Debug\\”。
@@ -52,7 +52,7 @@ events:
           0 个警告
           0 个错误
       
-      已用时间 00:00:01.49
+      已用时间 00:00:00.79
       
       
       Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CompilerIdCXX.exe"
@@ -71,8 +71,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-p5gfal"
-      binary: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-p5gfal"
+      source: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-hzzxh0"
+      binary: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-hzzxh0"
     cmakeVariables:
       CMAKE_CXX_FLAGS: "/DWIN32 /D_WINDOWS /GR /EHsc"
       CMAKE_CXX_FLAGS_DEBUG: "/Zi /Ob0 /Od /RTC1"
@@ -81,39 +81,149 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: true
       stdout: |
-        Change Dir: 'C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-p5gfal'
+        Change Dir: 'C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-hzzxh0'
         
-        Run Build Command(s): "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/MSBuild/Current/Bin/MSBuild.exe" cmTC_ac2e9.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=16.0 /v:n
+        Run Build Command(s): "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/MSBuild/Current/Bin/MSBuild.exe" cmTC_28d0f.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=16.0 /v:n
         用于 .NET Framework 的 Microsoft (R) 生成引擎版本 16.11.2+f32259642
         版权所有(C) Microsoft Corporation。保留所有权利。
         
-        生成启动时间为 2026/1/12 12:22:53。
-        节点 1 上的项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-p5gfal\\cmTC_ac2e9.vcxproj”(默认目标)。
+        生成启动时间为 2026/1/12 20:13:57。
+        节点 1 上的项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-hzzxh0\\cmTC_28d0f.vcxproj”(默认目标)。
         PrepareForBuild:
-          正在创建目录“cmTC_ac2e9.dir\\Debug\\”。
-          正在创建目录“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-p5gfal\\Debug\\”。
-          正在创建目录“cmTC_ac2e9.dir\\Debug\\cmTC_ac2e9.tlog\\”。
+          正在创建目录“cmTC_28d0f.dir\\Debug\\”。
+          正在创建目录“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-hzzxh0\\Debug\\”。
+          正在创建目录“cmTC_28d0f.dir\\Debug\\cmTC_28d0f.tlog\\”。
         InitializeBuildStatus:
-          正在创建“cmTC_ac2e9.dir\\Debug\\cmTC_ac2e9.tlog\\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+          正在创建“cmTC_28d0f.dir\\Debug\\cmTC_28d0f.tlog\\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
         ClCompile:
-          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\CL.exe /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /Fo"cmTC_ac2e9.dir\\Debug\\\\" /Fd"cmTC_ac2e9.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\cmake\\data\\share\\cmake-3.27\\Modules\\CMakeCXXCompilerABI.cpp"
+          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\CL.exe /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /Fo"cmTC_28d0f.dir\\Debug\\\\" /Fd"cmTC_28d0f.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\cmake\\data\\share\\cmake-3.27\\Modules\\CMakeCXXCompilerABI.cpp"
           用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.29.30154 版
           版权所有(C) Microsoft Corporation。保留所有权利。
           CMakeCXXCompilerABI.cpp
-          cl /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /Fo"cmTC_ac2e9.dir\\Debug\\\\" /Fd"cmTC_ac2e9.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\cmake\\data\\share\\cmake-3.27\\Modules\\CMakeCXXCompilerABI.cpp"
+          cl /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /Fo"cmTC_28d0f.dir\\Debug\\\\" /Fd"cmTC_28d0f.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\cmake\\data\\share\\cmake-3.27\\Modules\\CMakeCXXCompilerABI.cpp"
         Link:
-          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\link.exe /ERRORREPORT:QUEUE /OUT:"C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-p5gfal\\Debug\\cmTC_ac2e9.exe" /INCREMENTAL /ILK:"cmTC_ac2e9.dir\\Debug\\cmTC_ac2e9.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-p5gfal/Debug/cmTC_ac2e9.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-p5gfal/Debug/cmTC_ac2e9.lib" /MACHINE:X64  /machine:x64 cmTC_ac2e9.dir\\Debug\\CMakeCXXCompilerABI.obj
-          cmTC_ac2e9.vcxproj -> C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-p5gfal\\Debug\\cmTC_ac2e9.exe
+          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\link.exe /ERRORREPORT:QUEUE /OUT:"C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-hzzxh0\\Debug\\cmTC_28d0f.exe" /INCREMENTAL /ILK:"cmTC_28d0f.dir\\Debug\\cmTC_28d0f.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-hzzxh0/Debug/cmTC_28d0f.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-hzzxh0/Debug/cmTC_28d0f.lib" /MACHINE:X64  /machine:x64 cmTC_28d0f.dir\\Debug\\CMakeCXXCompilerABI.obj
+          cmTC_28d0f.vcxproj -> C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-hzzxh0\\Debug\\cmTC_28d0f.exe
         FinalizeBuildStatus:
-          正在删除文件“cmTC_ac2e9.dir\\Debug\\cmTC_ac2e9.tlog\\unsuccessfulbuild”。
-          正在对“cmTC_ac2e9.dir\\Debug\\cmTC_ac2e9.tlog\\cmTC_ac2e9.lastbuildstate”执行 Touch 任务。
-        已完成生成项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-p5gfal\\cmTC_ac2e9.vcxproj”(默认目标)的操作。
+          正在删除文件“cmTC_28d0f.dir\\Debug\\cmTC_28d0f.tlog\\unsuccessfulbuild”。
+          正在对“cmTC_28d0f.dir\\Debug\\cmTC_28d0f.tlog\\cmTC_28d0f.lastbuildstate”执行 Touch 任务。
+        已完成生成项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-hzzxh0\\cmTC_28d0f.vcxproj”(默认目标)的操作。
         
         已成功生成。
             0 个警告
             0 个错误
         
-        已用时间 00:00:01.09
+        已用时间 00:00:00.54
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/27118/AppData/Local/Programs/Python/Python311/Lib/site-packages/cmake/data/share/cmake-3.27/Modules/FindOpenMP.cmake:219 (try_compile)"
+      - "C:/Users/27118/AppData/Local/Programs/Python/Python311/Lib/site-packages/cmake/data/share/cmake-3.27/Modules/FindOpenMP.cmake:483 (_OPENMP_GET_FLAGS)"
+      - "CMakeLists.txt:5 (find_package)"
+    description: "Detecting CXX OpenMP compiler info"
+    directories:
+      source: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-6b2e50"
+      binary: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-6b2e50"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "/DWIN32 /D_WINDOWS /GR /EHsc"
+      CMAKE_CXX_FLAGS_DEBUG: "/Zi /Ob0 /Od /RTC1"
+      CMAKE_EXE_LINKER_FLAGS: "/machine:x64"
+    buildResult:
+      variable: "OpenMP_COMPILE_RESULT_CXX_openmp"
+      cached: true
+      stdout: |
+        Change Dir: 'C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-6b2e50'
+        
+        Run Build Command(s): "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/MSBuild/Current/Bin/MSBuild.exe" cmTC_9fb98.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=16.0 /v:n
+        用于 .NET Framework 的 Microsoft (R) 生成引擎版本 16.11.2+f32259642
+        版权所有(C) Microsoft Corporation。保留所有权利。
+        
+        生成启动时间为 2026/1/13 11:07:05。
+        节点 1 上的项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\cmTC_9fb98.vcxproj”(默认目标)。
+        PrepareForBuild:
+          正在创建目录“cmTC_9fb98.dir\\Debug\\”。
+          正在创建目录“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\Debug\\”。
+          正在创建目录“cmTC_9fb98.dir\\Debug\\cmTC_9fb98.tlog\\”。
+        InitializeBuildStatus:
+          正在创建“cmTC_9fb98.dir\\Debug\\cmTC_9fb98.tlog\\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+        ClCompile:
+          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\CL.exe /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /openmp /Fo"cmTC_9fb98.dir\\Debug\\\\" /Fd"cmTC_9fb98.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\OpenMPTryFlag.cpp"
+          用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.29.30154 版
+          版权所有(C) Microsoft Corporation。保留所有权利。
+          OpenMPTryFlag.cpp
+          cl /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /openmp /Fo"cmTC_9fb98.dir\\Debug\\\\" /Fd"cmTC_9fb98.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\OpenMPTryFlag.cpp"
+        Link:
+          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\link.exe /ERRORREPORT:QUEUE /OUT:"C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\Debug\\cmTC_9fb98.exe" /INCREMENTAL /ILK:"cmTC_9fb98.dir\\Debug\\cmTC_9fb98.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-6b2e50/Debug/cmTC_9fb98.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-6b2e50/Debug/cmTC_9fb98.lib" /MACHINE:X64  /machine:x64 cmTC_9fb98.dir\\Debug\\OpenMPTryFlag.obj
+          cmTC_9fb98.vcxproj -> C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\Debug\\cmTC_9fb98.exe
+        FinalizeBuildStatus:
+          正在删除文件“cmTC_9fb98.dir\\Debug\\cmTC_9fb98.tlog\\unsuccessfulbuild”。
+          正在对“cmTC_9fb98.dir\\Debug\\cmTC_9fb98.tlog\\cmTC_9fb98.lastbuildstate”执行 Touch 任务。
+        已完成生成项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-6b2e50\\cmTC_9fb98.vcxproj”(默认目标)的操作。
+        
+        已成功生成。
+            0 个警告
+            0 个错误
+        
+        已用时间 00:00:00.73
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/27118/AppData/Local/Programs/Python/Python311/Lib/site-packages/cmake/data/share/cmake-3.27/Modules/FindOpenMP.cmake:419 (try_compile)"
+      - "C:/Users/27118/AppData/Local/Programs/Python/Python311/Lib/site-packages/cmake/data/share/cmake-3.27/Modules/FindOpenMP.cmake:557 (_OPENMP_GET_SPEC_DATE)"
+      - "CMakeLists.txt:5 (find_package)"
+    description: "Detecting CXX OpenMP version"
+    directories:
+      source: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-468nmj"
+      binary: "C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-468nmj"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "/DWIN32 /D_WINDOWS /GR /EHsc"
+      CMAKE_CXX_FLAGS_DEBUG: "/Zi /Ob0 /Od /RTC1"
+      CMAKE_EXE_LINKER_FLAGS: "/machine:x64"
+    buildResult:
+      variable: "OpenMP_SPECTEST_CXX_"
+      cached: true
+      stdout: |
+        Change Dir: 'C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-468nmj'
+        
+        Run Build Command(s): "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/MSBuild/Current/Bin/MSBuild.exe" cmTC_a150e.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=16.0 /v:n
+        用于 .NET Framework 的 Microsoft (R) 生成引擎版本 16.11.2+f32259642
+        版权所有(C) Microsoft Corporation。保留所有权利。
+        
+        生成启动时间为 2026/1/13 11:07:06。
+        节点 1 上的项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\cmTC_a150e.vcxproj”(默认目标)。
+        PrepareForBuild:
+          正在创建目录“cmTC_a150e.dir\\Debug\\”。
+          正在创建目录“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\Debug\\”。
+          正在创建目录“cmTC_a150e.dir\\Debug\\cmTC_a150e.tlog\\”。
+        InitializeBuildStatus:
+          正在创建“cmTC_a150e.dir\\Debug\\cmTC_a150e.tlog\\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+        ClCompile:
+          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\CL.exe /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /openmp /Fo"cmTC_a150e.dir\\Debug\\\\" /Fd"cmTC_a150e.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\OpenMPCheckVersion.cpp"
+          用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.29.30154 版
+          版权所有(C) Microsoft Corporation。保留所有权利。
+          OpenMPCheckVersion.cpp
+          cl /c /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /GR /openmp /Fo"cmTC_a150e.dir\\Debug\\\\" /Fd"cmTC_a150e.dir\\Debug\\vc142.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\OpenMPCheckVersion.cpp"
+        Link:
+          C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30133\\bin\\HostX64\\x64\\link.exe /ERRORREPORT:QUEUE /OUT:"C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\Debug\\cmTC_a150e.exe" /INCREMENTAL /ILK:"cmTC_a150e.dir\\Debug\\cmTC_a150e.ilk" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-468nmj/Debug/cmTC_a150e.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:/Users/27118/Desktop/Imperial/abstraction-recovery/cpp/build-release/CMakeFiles/CMakeScratch/TryCompile-468nmj/Debug/cmTC_a150e.lib" /MACHINE:X64  /machine:x64 cmTC_a150e.dir\\Debug\\OpenMPCheckVersion.obj
+          cmTC_a150e.vcxproj -> C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\Debug\\cmTC_a150e.exe
+        FinalizeBuildStatus:
+          正在删除文件“cmTC_a150e.dir\\Debug\\cmTC_a150e.tlog\\unsuccessfulbuild”。
+          正在对“cmTC_a150e.dir\\Debug\\cmTC_a150e.tlog\\cmTC_a150e.lastbuildstate”执行 Touch 任务。
+        已完成生成项目“C:\\Users\\27118\\Desktop\\Imperial\\abstraction-recovery\\cpp\\build-release\\CMakeFiles\\CMakeScratch\\TryCompile-468nmj\\cmTC_a150e.vcxproj”(默认目标)的操作。
+        
+        已成功生成。
+            0 个警告
+            0 个错误
+        
+        已用时间 00:00:00.60
         
       exitCode: 0
 ...

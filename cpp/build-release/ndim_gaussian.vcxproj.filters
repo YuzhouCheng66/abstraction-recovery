@@ -13,6 +13,9 @@
     <ClCompile Include="C:\Users\27118\Desktop\Imperial\abstraction-recovery\cpp\src\gbp\FactorGraph.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\27118\Desktop\Imperial\abstraction-recovery\cpp\src\gbp\HierarchyGBP.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\Users\27118\Desktop\Imperial\abstraction-recovery\cpp\CMakeLists.txt" />

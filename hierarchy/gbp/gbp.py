@@ -248,33 +248,28 @@ class FactorGraph:
 
         # ---------- 初始化 var_heap ----------
         if len(self.var_heap) == 0:
-            # NOTE: 这里用 self.var_nodes，换成你自己的变量列表名字
             for v in self.var_nodes:
-                # 初始 residual 都设为 0，这样 tie 的时候按 varID 顺序
-                r0 = 0
+                r0 = 0.0
                 self.var_residual[v] = r0
-                # 元素结构：(-residual, varID, var)
                 heapq.heappush(self.var_heap, (-r0, v.variableID, v))
 
-        
         n_updates = 0
-        while n_updates < min(len(self.var_heap), len(self.var_nodes)):
+
+        # 本轮最多扩散 |V| 次；heap 空则提前结束
+        while (n_updates < len(self.var_nodes)) and len(self.var_heap) > 0:
             neg_r_v, _, v = heapq.heappop(self.var_heap)
             r_v = -neg_r_v
 
-            # 当前记录的 residual
             cur_r = self.var_residual.get(v, 0.0)
 
-            # 过期条目：只接受“和当前记录相等”的 entry，其余全部丢掉
+            # stale entry
             if abs(r_v - cur_r) > 1e-12:
                 continue
 
             # ===== 对 v 的邻居 factors 做一次“扩散” =====
             for f in v.adj_factors:
-                # 一次 factor -> vars 的消息更新
                 f.compute_messages(self.eta_damping)
 
-                # 再对 f.adj_var_nodes 里的每个 variable u 更新 belief 和 residual
                 for u in f.adj_var_nodes:
                     old_eta = np.array(u.belief.eta, copy=True)
                     u.update_belief()
@@ -283,12 +278,11 @@ class FactorGraph:
                     est_r_u = float(np.linalg.norm(new_eta - old_eta))
                     old_r_u = self.var_residual.get(u, 0.0)
 
-                    # 只有当新的 residual 更大时才更新
                     if est_r_u > old_r_u + 1e-12:
                         self.var_residual[u] = est_r_u
                         heapq.heappush(self.var_heap, (-est_r_u, u.variableID, u))
 
-            # 这个 variable 已经被“用来扩散过”，本轮里视为 residual 清零
+            # 本轮用 v 扩散过，视为 residual 清零
             self.var_residual[v] = 0.0
             n_updates += 1
     
@@ -382,6 +376,7 @@ class VariableNode:
         self.prior = NdimGaussian(dofs)
         self.dofs = dofs
 
+
     def update_belief(self):
         """
             Update local belief estimate by taking product of all incoming messages along all edges.
@@ -399,9 +394,14 @@ class VariableNode:
         self.belief.eta = eta 
         self.belief.lam = lam
 
+        # try-except 注释，仅保留原 try 内容
         c, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
-        self.mu = scipy.linalg.cho_solve((c, lower), eta)            # solve Lam mu = eta
         self.Sigma = scipy.linalg.cho_solve((c, lower), np.eye(lam.shape[0]))  # 解 Lam Sigma = I
+        self.mu = self.Sigma @ eta
+        # except np.linalg.LinAlgError:
+        #     # fallback: 用伪逆
+        #     self.Sigma = np.linalg.pinv(lam)
+        #     self.mu = self.Sigma @ eta
 
         # Send belief to adjacent factors
         for factor in self.adj_factors:
@@ -634,12 +634,14 @@ class Factor:
                 lnono = lam_factor[:divide, :divide]
 
             lnono += 1e-12 * np.eye(lnono.shape[0])
-            
-            L = np.linalg.cholesky(lnono)
             # concat RHS
             rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
-            # cho_solve:  lnono_j * X = rhs_j
+            # try-except 注释，仅保留原 try 内容
+            L = np.linalg.cholesky(lnono)
             X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
+            # except np.linalg.LinAlgError:
+            #     # fallback: 用伪逆
+            #     X = np.linalg.pinv(lnono) @ rhs_j
             X_lam = X[:, :lnoo.shape[1]]
             X_eta = X[:, -1]
 

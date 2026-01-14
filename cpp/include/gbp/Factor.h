@@ -1,9 +1,15 @@
 #pragma once
 #include <Eigen/Dense>
+#include <Eigen/Cholesky>
 #include <vector>
-#include <memory>
 #include <cassert>
+#include <functional>
+#include <stdexcept>
 #include "NdimGaussian.h"
+
+// Profiling utilities for computeFactor analysis
+void printComputeFactorProfile();
+void resetComputeFactorProfile();
 
 namespace gbp {
 
@@ -11,49 +17,106 @@ class VariableNode;
 
 class Factor {
 public:
-    int id = -1;
     int factorID = -1;
-    int dim = 0;
     bool active = true;
 
-    // Only 1-ary or 2-ary factor in your project
-    std::vector<VariableNode*> adj_var_nodes;   // size 1 or 2
-    std::vector<VariableNode*> var_nodes;       // Alias for SLAM compatibility
-    std::vector<int> adj_vIDs;                  // cached ids (same size)
+    std::vector<VariableNode*> adj_var_nodes;
+    std::vector<int> adj_vIDs;
 
-    // Incoming beliefs at factor side (optional mirror; keep for parity)
-    // In this minimal version, FactorGraph will keep them updated implicitly by reading var->belief if needed.
-    // But messages update needs "adj_beliefs - messages" term, so we store adj_beliefs like Python.
     std::vector<utils::NdimGaussian> adj_beliefs;
-
-    // Outgoing messages from factor to each variable (same size as adj_var_nodes)
     std::vector<utils::NdimGaussian> messages;
 
-    // The factor distribution in information form over concatenated variables
-    utils::NdimGaussian factor; // dim = dofs(v0)+dofs(v1) or dofs(v0)
-    
-    // Measurements and precisions (for direct construction without nonlinear factors)
-    std::vector<Eigen::VectorXd> measurements;
-    std::vector<Eigen::MatrixXd> precisions;
+    std::vector<Eigen::VectorXd> measurement;         // z_i
+    std::vector<Eigen::MatrixXd> measurement_lambda;  // Λ_i
 
-    // For local damping / relinearization (optional)
+    std::function<std::vector<Eigen::VectorXd>(const Eigen::VectorXd&)> meas_fn;
+    std::function<std::vector<Eigen::MatrixXd>(const Eigen::VectorXd&)>  jac_fn;
+
+    utils::NdimGaussian factor;
+    Eigen::VectorXd linpoint;
+
     double eta_damping_local = 0.0;
 
-    explicit Factor(int id, const std::vector<VariableNode*>& vars);
-    Factor();  // Default constructor
+    Factor(
+        int id,
+        const std::vector<VariableNode*>& vars,
+        const std::vector<Eigen::VectorXd>& z,
+        const std::vector<Eigen::MatrixXd>& lambda,
+        std::function<std::vector<Eigen::VectorXd>(const Eigen::VectorXd&)> meas,
+        std::function<std::vector<Eigen::MatrixXd>(const Eigen::VectorXd&)>  jac
+    );
 
-    // Call after you connect factor to variables:
-    // initialize adj_beliefs from current variable beliefs and messages to zeros.
     void syncAdjBeliefsFromVariables();
-
-    // Compute factor distribution from measurements and linearization point
-    void computeFactor();
-
-    // Core GBP kernel
+    void computeFactor(const Eigen::VectorXd& linpoint, bool update_self = true);
+    // Jacobian/Lambda cache control (use when structure changes)
+    void invalidateJacobianCache();
     void computeMessages(double eta_damping);
 
 private:
     static constexpr double kJitter = 1e-12;
+
+    // ==========================
+    // Fixed dimensions (set once)
+    // ==========================
+    bool is_unary_  = false;
+    bool is_binary_ = false;
+
+    int d0_ = 0;   // dofs(var0) if binary, else dofs(var0) for unary
+    int d1_ = 0;   // dofs(var1) if binary, else 0
+    int D_  = 0;   // total dofs = d0_ + d1_
+
+    // For binary Schur:
+    // target==0 (msg to v0): d_o=d0_, d_no=d1_
+    // target==1 (msg to v1): d_o=d1_, d_no=d0_
+    inline int d_o_(int target)  const { return (target == 0) ? d0_ : d1_; }
+    inline int d_no_(int target) const { return (target == 0) ? d1_ : d0_; }
+
+    // ==========================
+    // Workspace (allocated once)
+    // ==========================
+    // Copy of factor (eta, lam) with belief correction applied
+    Eigen::VectorXd eta_f_;      // size: D_
+    Eigen::MatrixXd lam_f_;      // size: D_ x D_
+
+    // lnono copy (for jitter + factorization), sized to max(d0_, d1_)
+    Eigen::MatrixXd lnono_;      // size: max(d0_,d1_) x max(d0_,d1_)
+
+    // Solutions:
+    // Y_:  (d_no x d_o)  and y_: (d_no)
+    // Allocate at max sizes and use topLeftCorner/head when needed.
+    Eigen::MatrixXd Y_;          // size: max_no x max_o
+    Eigen::VectorXd y_;          // size: max_no
+
+    Eigen::LLT<Eigen::MatrixXd> llt_;  // reusable factorization object
+
+    // Temporaries for msg_lam/msg_eta isolation (optional but keep for parity)
+    Eigen::MatrixXd tmpLam_;     // size: max_o x max_o
+    Eigen::VectorXd tmpEta_;     // size: max_o
+
+    // ==========================
+    // computeFactor workspace
+    // ==========================
+    // Reuse eta_f_/lam_f_ as (eta_factor/lambda_factor) accumulators.
+    Eigen::VectorXd ri_cf_;      // residual per measurement block (m)
+    Eigen::VectorXd tmpv_cf_;    // tmp vector: Oi * ri (m)
+    Eigen::MatrixXd tmpm_cf_;    // tmp matrix: Oi * Ji (m x D)
+
+
+    // ==========================
+    // Jacobian / Lambda cache (J assumed constant across iterations)
+    // ==========================
+    bool jcache_valid_ = false;   // whether J/JO/Lambda cache is valid
+    bool lamcache_set_ = false;   // whether factor.lam has been set from cache
+    std::vector<Eigen::MatrixXd> J_cache_;   // blocks Ji (m x D)
+    std::vector<Eigen::MatrixXd> JO_cache_;  // blocks (Ji^T * Oi) (D x m)
+    Eigen::MatrixXd lambda_cache_;           // sum_i (Ji^T * Oi * Ji) (D x D)
+
+    // Outputs (allocated once)
+    Eigen::VectorXd new_eta_[2]; // size: d0_ / d1_
+    Eigen::MatrixXd new_lam_[2]; // size: d0_xd0 / d1_xd1
+
+private:
+    void initWorkspace_();
 };
 
 } // namespace gbp

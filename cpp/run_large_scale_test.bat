@@ -10,6 +10,7 @@ if not exist "%VCVARS%" (
 call "%VCVARS%"
 
 REM Build directory
+
 set BUILD_DIR=build-release
 
 REM Clean and reconfigure
@@ -23,7 +24,7 @@ mkdir "%BUILD_DIR%"
 cd "%BUILD_DIR%"
 
 echo Configuring CMake for x64 with Visual Studio...
-cmake -G "Visual Studio 16 2019" -A x64 -DCMAKE_BUILD_TYPE=Release ..
+cmake -G "Visual Studio 16 2019" -A x64 -DCMAKE_BUILD_TYPE=Release .
 if errorlevel 1 (
     echo CMake configuration failed
     cd ..
@@ -47,7 +48,7 @@ echo Running large-scale SLAM convergence test...
 echo ===============================================
 echo.
 
-.\test_large_scale_slam.exe
+.\Release\test_large_scale_slam.exe
 
 cd ..
 pause

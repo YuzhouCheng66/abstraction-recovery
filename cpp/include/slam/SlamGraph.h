@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <string>
 #include <Eigen/Dense>
 
 namespace slam {
@@ -89,5 +90,7 @@ std::vector<Layer> initLayers(
     unsigned int seed = 0,
     bool use_seed = false
 );
+
+
 
 } // namespace slam

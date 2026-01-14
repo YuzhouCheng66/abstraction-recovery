@@ -16,18 +16,20 @@ SlamGraph makeSlamLikeGraph(
     bool use_seed)
 {
     SlamGraph graph;
-    
-    // Initialize random number generator
+
+    if (N <= 0) return graph;
+
+    // Single RNG drives EVERYTHING, matching Python default_rng(seed)
     std::mt19937 rng(use_seed ? seed : std::random_device{}());
     std::normal_distribution<double> normal_dist(0.0, 1.0);
-    std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-    
-    // ============ Generate trajectory ============
+    std::uniform_real_distribution<double> uniform01(0.0, 1.0);
+
+    // ============ 1) Generate trajectory (Python: standard_normal + normalize) ============
     double x = 0.0, y = 0.0;
     std::vector<std::pair<double, double>> positions;
+    positions.reserve(N);
     positions.push_back({x, y});
-    
-    // Random walk: each step is a normalized Gaussian sample
+
     for (int i = 1; i < N; ++i) {
         double dx = normal_dist(rng);
         double dy = normal_dist(rng);
@@ -38,8 +40,9 @@ SlamGraph makeSlamLikeGraph(
         y += dy;
         positions.push_back({x, y});
     }
-    
-    // ============ Create nodes ============
+
+    // ============ 2) Create nodes ============
+    graph.nodes.reserve(N);
     for (int i = 0; i < N; ++i) {
         SlamNode node;
         node.id = i;
@@ -49,74 +52,75 @@ SlamGraph makeSlamLikeGraph(
         node.GT = node.position;
         graph.nodes.push_back(node);
     }
-    
-    // ============ Sequential edges along the path ============
+
+    // ============ 3) Sequential edges (i -> i+1) ============
+    // Python: for i in range(N-1): edges.append({source:i, target:i+1})
     for (int i = 0; i < N - 1; ++i) {
-        SlamEdge edge(i, i + 1);
-        graph.edges.push_back(edge);
+        SlamEdge e(i, i + 1);
+        // is_prior/is_anchor remain false
+        graph.edges.push_back(e);
     }
-    
-    // ============ Loop closure edges ============
+
+    // ============ 4) Loop closures ============
+    // Python: for i in range(N): for j in range(i+5,N):
+    //         if rng.random()<loop_prob and dist<loop_radius: add edge(i,j)
     for (int i = 0; i < N; ++i) {
         for (int j = i + 5; j < N; ++j) {
-            if (uniform_dist(rng) < loop_prob) {
+            if (uniform01(rng) < loop_prob) {
                 double xi = positions[i].first;
                 double yi = positions[i].second;
                 double xj = positions[j].first;
                 double yj = positions[j].second;
                 double dist = std::hypot(xi - xj, yi - yj);
-                
                 if (dist < loop_radius) {
-                    SlamEdge edge(i, j);
-                    graph.edges.push_back(edge);
+                    SlamEdge e(i, j);
+                    graph.edges.push_back(e);
                 }
             }
         }
     }
-    
-    // ============ Determine nodes with strong priors ============
+
+    // ============ 5) Strong prior node selection (match numpy choice replace=False) ============
     std::vector<int> strong_ids;
-    
     if (prior_prop <= 0.0) {
-        // Only anchor node 0
-        strong_ids.push_back(0);
+        strong_ids = {0};
     } else if (prior_prop >= 1.0) {
-        // All nodes have strong priors
-        for (int i = 0; i < N; ++i) {
-            strong_ids.push_back(i);
-        }
+        strong_ids.resize(N);
+        std::iota(strong_ids.begin(), strong_ids.end(), 0);
     } else {
-        // Randomly select a proportion of nodes
         int k = std::max(1, static_cast<int>(std::floor(prior_prop * N)));
+
         std::vector<int> all_ids(N);
         std::iota(all_ids.begin(), all_ids.end(), 0);
-        
-        // Fisher-Yates shuffle to select k random nodes
-        for (int i = 0; i < k; ++i) {
-            int j = i + static_cast<int>(uniform_dist(rng) * (N - i));
-            std::swap(all_ids[i], all_ids[j]);
-        }
+
+        // closest to numpy rng.choice(N, k, replace=False)
+        std::shuffle(all_ids.begin(), all_ids.end(), rng);
+
         strong_ids.insert(strong_ids.end(), all_ids.begin(), all_ids.begin() + k);
     }
-    
-    // ============ Add prior edges ============
+
+    // ============ 6) Add prior edges ============
+    // Python: edges.append({source:i, target:"prior"})
     for (int id : strong_ids) {
-        SlamEdge prior_edge;
-        prior_edge.source = id;
-        prior_edge.target = -1;  // Special marker for prior
-        prior_edge.is_prior = true;
-        prior_edge.is_anchor = false;
-        graph.edges.push_back(prior_edge);
+        SlamEdge prior_e;
+        prior_e.source = id;
+        prior_e.target = -1;     // marker for prior
+        prior_e.is_prior = true;
+        prior_e.is_anchor = false;
+        graph.edges.push_back(prior_e);
     }
-    
-    // ============ Add anchor edge for node 0 ============
-    SlamEdge anchor_edge;
-    anchor_edge.source = 0;
-    anchor_edge.target = -2;  // Special marker for anchor
-    anchor_edge.is_prior = true;
-    anchor_edge.is_anchor = true;
-    graph.edges.push_back(anchor_edge);
-    
+
+    // ============ 7) Add anchor edge (always) ============
+    // Python: edges.append({source:0, target:"anchor"})
+    {
+        SlamEdge anchor_e;
+        anchor_e.source = 0;
+        anchor_e.target = -2;    // marker for anchor
+        anchor_e.is_prior = true;
+        anchor_e.is_anchor = true;
+        graph.edges.push_back(anchor_e);
+    }
+
     return graph;
 }
 
