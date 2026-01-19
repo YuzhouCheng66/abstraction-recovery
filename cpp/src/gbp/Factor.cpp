@@ -16,18 +16,18 @@ static std::atomic<long long> g_cf_loop_eta_ns{0};
 static std::atomic<int> g_cf_call_count{0};
 
 void printComputeFactorProfile() {
-    int calls = g_cf_call_count.load();
-    if (calls == 0) {
-        std::cout << "[computeFactor Profile] No calls recorded.\n";
-        return;
-    }
-    auto toMs = [](long long ns) { return ns / 1e6; };
-    std::cout << "\n=== computeFactor Detailed Profile (" << calls << " calls) ===\n";
-    std::cout << "  jac_fn:        " << toMs(g_cf_jac_ns.load()) << " ms\n";
-    std::cout << "  meas_fn:       " << toMs(g_cf_meas_ns.load()) << " ms\n";
-    std::cout << "  loop (lambda): " << toMs(g_cf_loop_lam_ns.load()) << " ms\n";
-    std::cout << "  loop (eta):    " << toMs(g_cf_loop_eta_ns.load()) << " ms\n";
-    std::cout << "==============================================\n";
+    // int calls = g_cf_call_count.load();
+    // if (calls == 0) {
+    //     std::cout << "[computeFactor Profile] No calls recorded.\n";
+    //     return;
+    // }
+    // auto toMs = [](long long ns) { return ns / 1e6; };
+    // std::cout << "\n=== computeFactor Detailed Profile (" << calls << " calls) ===\n";
+    // std::cout << "  jac_fn:        " << toMs(g_cf_jac_ns.load()) << " ms\n";
+    // std::cout << "  meas_fn:       " << toMs(g_cf_meas_ns.load()) << " ms\n";
+    // std::cout << "  loop (lambda): " << toMs(g_cf_loop_lam_ns.load()) << " ms\n";
+    // std::cout << "  loop (eta):    " << toMs(g_cf_loop_eta_ns.load()) << " ms\n";
+    // std::cout << "==============================================\n";
 }
 
 void resetComputeFactorProfile() {
@@ -101,13 +101,13 @@ Factor::Factor(
     factor   = utils::NdimGaussian(total_dofs);
     linpoint = Eigen::VectorXd::Zero(total_dofs);
 
-    // Allocate adj_beliefs/messages (fixed per-variable dofs)
-    adj_beliefs.reserve(adj_var_nodes.size());
+    // Allocate messages (fixed per-variable dofs) [C: ping-pong buffers]
     messages.reserve(adj_var_nodes.size());
+    messages_next.reserve(adj_var_nodes.size());
     for (auto* v : adj_var_nodes) {
         assert(v != nullptr);
-        adj_beliefs.emplace_back(v->dofs);
         messages.emplace_back(v->dofs);
+        messages_next.emplace_back(v->dofs);
     }
 
     // Sanity: Python assumes same length
@@ -140,25 +140,13 @@ void Factor::initWorkspace_() {
     tmpLam_.resize(max_d, max_d); // use topLeftCorner(d_o, d_o)
     tmpEta_.resize(max_d);        // use head(d_o)
 
-    // outputs fixed per target
-    new_eta_[0].resize(d0_);
-    new_lam_[0].resize(d0_, d0_);
-    new_eta_[1].resize(d1_);
-    new_lam_[1].resize(d1_, d1_);
+    // NOTE (C optimization): message outputs write directly into messages_next,
+    // so no separate new_eta_/new_lam_ staging buffers are needed.
 }
 
 // ==============================
-// sync, factor computation
+// factor computation
 // ==============================
-
-void Factor::syncAdjBeliefsFromVariables() {
-    for (int i = 0; i < (int)adj_var_nodes.size(); ++i) {
-        auto* v = adj_var_nodes[i];
-        adj_beliefs[i].setEta(v->belief.eta());
-        adj_beliefs[i].setLam(v->belief.lam());
-    }
-}
-
 void Factor::invalidateJacobianCache() {
     jcache_valid_ = false;
     lamcache_set_ = false;
@@ -168,25 +156,28 @@ void Factor::invalidateJacobianCache() {
 }
 
 void Factor::computeFactor(const Eigen::VectorXd& linpoint_in, bool update_self) {
-    ++g_cf_call_count;
+    // ++g_cf_call_count;  // disabled for performance
 
-    linpoint = linpoint_in;
+    // Avoid redundant self-copy when caller reuses Factor::linpoint as the input buffer.
+    if (&linpoint_in != &linpoint) {
+        linpoint = linpoint_in;
+    }
 
     // meas_fn may depend on current linpoint (e.g. via k), so we evaluate it every call.
-    auto t0 = std::chrono::high_resolution_clock::now();
+    // auto t0 = std::chrono::high_resolution_clock::now();
     auto pred = meas_fn(linpoint);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    g_cf_meas_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    // auto t1 = std::chrono::high_resolution_clock::now();
+    // g_cf_meas_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
 
     const int D = (int)linpoint.size();
 
     // Build Jacobian-derived caches lazily (assumes J and measurement_lambda do not change
     // across iterations for the current graph / abstraction).
     if (!jcache_valid_) {
-        auto tJ0 = std::chrono::high_resolution_clock::now();
+        // auto tJ0 = std::chrono::high_resolution_clock::now();
         auto J = jac_fn(linpoint);
-        auto tJ1 = std::chrono::high_resolution_clock::now();
-        g_cf_jac_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(tJ1 - tJ0).count();
+        // auto tJ1 = std::chrono::high_resolution_clock::now();
+        // g_cf_jac_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(tJ1 - tJ0).count();
 
         if (J.size() != measurement.size() ||
             J.size() != measurement_lambda.size() ||
@@ -235,25 +226,25 @@ void Factor::computeFactor(const Eigen::VectorXd& linpoint_in, bool update_self)
     eta_f_.resize(D);
     eta_f_.setZero();
 
-    auto t2 = std::chrono::high_resolution_clock::now();
+    // auto t2 = std::chrono::high_resolution_clock::now();
 
     for (size_t i = 0; i < J_cache_.size(); ++i) {
         const Eigen::MatrixXd& Ji = J_cache_[i];
         const Eigen::VectorXd& zi = measurement[i];
         const Eigen::VectorXd& hi = pred[i];
 
+        const int m = (int)zi.size();
+
         // ri = Ji * linpoint + zi - hi
-        ri_cf_.resize((int)zi.size());
-        ri_cf_.noalias() = Ji * linpoint;
-        ri_cf_.noalias() += zi;
-        ri_cf_.noalias() -= hi;
+        // Use head() view if ri_cf_ is large enough, else resize once
+        if (ri_cf_.size() < m) ri_cf_.resize(m);
+        auto ri = ri_cf_.head(m);
+        ri.noalias() = Ji * linpoint;
+        ri += zi;
+        ri -= hi;
 
         // eta += (Ji^T * Oi) * ri  == JO_i * ri
-        eta_f_.noalias() += JO_cache_[i] * ri_cf_;
-
-        auto t_eta = std::chrono::high_resolution_clock::now();
-        g_cf_loop_eta_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t_eta - t2).count();
-        t2 = t_eta;
+        eta_f_.noalias() += JO_cache_[i] * ri;
     }
 
     if (update_self) {
@@ -269,24 +260,166 @@ void Factor::computeFactor(const Eigen::VectorXd& linpoint_in, bool update_self)
 // computeMessages (no resize path)
 // ==============================
 
+
+
 void Factor::computeMessages(double eta_damping) {
+
+
+
+
     if (!active) return;
 
     // Unary: trivial
     if (is_unary_) {
-        messages[0].setEta(factor.eta());
-        messages[0].setLam(factor.lam());
+        auto& outMsg = messages_next[0];
+        outMsg.etaRef().noalias() = factor.eta();
+        outMsg.lamRef().noalias() = factor.lam();
+        messages.swap(messages_next);
         return;
     }
 
     // Binary: dimensions are fixed (d0_, d1_, D_)
     // old messages (copies) - unavoidable if messages[k] returns by value internally
-    const Eigen::VectorXd old_eta0 = messages[0].eta();
-    const Eigen::MatrixXd old_lam0 = messages[0].lam();
-    const Eigen::VectorXd old_eta1 = messages[1].eta();
-    const Eigen::MatrixXd old_lam1 = messages[1].lam();
+    const Eigen::VectorXd& old_eta0 = messages[0].eta();
+    const Eigen::MatrixXd& old_lam0 = messages[0].lam();
+    const Eigen::VectorXd& old_eta1 = messages[1].eta();
+    const Eigen::MatrixXd& old_lam1 = messages[1].lam();
 
     const double a = eta_damping;
+
+    // ------------------------------------------------------------
+    // Fast path: 2D-2D binary factor (fixed-size Eigen kernels)
+    // ------------------------------------------------------------
+    // This keeps the same math as the dynamic path but uses fixed-size
+    // matrices/vectors to reduce Eigen's dynamic-size overhead.
+    // No explicit inverses are used; we still rely on LLT solves.
+    if (d0_ == 2 && d1_ == 2 && D_ == 4) {
+        if (d0_ == 2 && d1_ == 2 && D_ == 4) {
+            using Vec2 = Eigen::Matrix<double, 2, 1>;
+            using Vec4 = Eigen::Matrix<double, 4, 1>;
+            using Mat2 = Eigen::Matrix<double, 2, 2>;
+            using Mat4 = Eigen::Matrix<double, 4, 4>;
+
+            // Map factor blocks (assumes column-major Eigen default, contiguous storage).
+            const auto& eta_dyn = factor.eta();
+            const auto& lam_dyn = factor.lam();
+            assert(eta_dyn.size() == 4);
+            assert(lam_dyn.rows() == 4 && lam_dyn.cols() == 4);
+
+            const Eigen::Map<const Vec4> eta_f0(eta_dyn.data());
+            const Eigen::Map<const Mat4> lam_f0(lam_dyn.data());
+
+            // Old messages (maps)
+            const Eigen::Map<const Vec2> old0_eta(old_eta0.data());
+            const Eigen::Map<const Vec2> old1_eta(old_eta1.data());
+            const Eigen::Map<const Mat2> old0_lam(old_lam0.data());
+            const Eigen::Map<const Mat2> old1_lam(old_lam1.data());
+
+            // Beliefs (maps)
+            const auto& b0 = adj_var_nodes[0]->belief;
+            const auto& b1 = adj_var_nodes[1]->belief;
+            const Eigen::Map<const Vec2> b0_eta(b0.eta().data());
+            const Eigen::Map<const Vec2> b1_eta(b1.eta().data());
+            const Eigen::Map<const Mat2> b0_lam(b0.lam().data());
+            const Eigen::Map<const Mat2> b1_lam(b1.lam().data());
+
+            // Note: we intentionally fully unroll target=0/1 here to avoid
+            // any target-dependent branches in the hot path (including damping).
+
+            const double s = 1.0 - a;  // damping scale
+
+            // =====================
+            // target = 0 (to v0, eliminate v1)
+            // =====================
+            {
+                const Vec2 eo   = eta_f0.template segment<2>(0);
+                const Vec2 eno  = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
+
+                const Mat2 loo   = lam_f0.template block<2, 2>(0, 0);
+                const Mat2 lono  = lam_f0.template block<2, 2>(0, 2);
+                const Mat2 lnoo  = lam_f0.template block<2, 2>(2, 0);
+                Mat2 lnono       = lam_f0.template block<2, 2>(2, 2);
+                lnono.noalias() += (b1_lam - old1_lam);
+                lnono.diagonal().array() += kJitter;
+
+                Eigen::LLT<Mat2> llt2;
+                llt2.compute(lnono);
+                if (llt2.info() != Eigen::Success) {
+                    throw std::runtime_error("LLT failed in Factor::computeMessages (2D fast path, target=0)");
+                }
+                // Solve in fixed-size kernels
+                const Mat2 Y = llt2.solve(lnoo);
+                const Vec2 y = llt2.solve(eno);
+
+                Mat2 outLam2 = loo - lono * Y;
+                Vec2 outEta2 = eo  - lono * y;
+
+                // Write message[0]
+                utils::NdimGaussian& outMsg = messages_next[0];
+                Eigen::MatrixXd& outLam = outMsg.lamRef();
+                Eigen::VectorXd& outEta = outMsg.etaRef();
+                assert(outLam.rows() == 2 && outLam.cols() == 2);
+                assert(outEta.size() == 2);
+
+                if (a != 0.0) {
+                    outLam2 *= s;
+                    outEta2 *= s;
+                    outLam2.noalias() += a * old0_lam;
+                    outEta2.noalias() += a * old0_eta;
+                }
+
+                outLam = outLam2;
+                outEta = outEta2;
+            }
+
+            // =====================
+            // target = 1 (to v1, eliminate v0)
+            // =====================
+            {
+                const Vec2 eo   = eta_f0.template segment<2>(2);
+                const Vec2 eno  = eta_f0.template segment<2>(0) + (b0_eta - old0_eta);
+
+                const Mat2 loo   = lam_f0.template block<2, 2>(2, 2);
+                const Mat2 lono  = lam_f0.template block<2, 2>(2, 0);
+                const Mat2 lnoo  = lam_f0.template block<2, 2>(0, 2);
+                Mat2 lnono       = lam_f0.template block<2, 2>(0, 0);
+                lnono.noalias() += (b0_lam - old0_lam);
+                lnono.diagonal().array() += kJitter;
+
+                Eigen::LLT<Mat2> llt2;
+                llt2.compute(lnono);
+                if (llt2.info() != Eigen::Success) {
+                    throw std::runtime_error("LLT failed in Factor::computeMessages (2D fast path, target=1)");
+                }
+                const Mat2 Y = llt2.solve(lnoo);
+                const Vec2 y = llt2.solve(eno);
+
+                Mat2 outLam2 = loo - lono * Y;
+                Vec2 outEta2 = eo  - lono * y;
+
+                // Write message[1]
+                utils::NdimGaussian& outMsg = messages_next[1];
+                Eigen::MatrixXd& outLam = outMsg.lamRef();
+                Eigen::VectorXd& outEta = outMsg.etaRef();
+                assert(outLam.rows() == 2 && outLam.cols() == 2);
+                assert(outEta.size() == 2);
+
+                if (a != 0.0) {
+                    outLam2 *= s;
+                    outEta2 *= s;
+                    outLam2.noalias() += a * old1_lam;
+                    outEta2.noalias() += a * old1_eta;
+                }
+
+                outLam = outLam2;
+                outEta = outEta2;
+            }
+
+            // Commit outputs with O(1) swap (NO deep copy)
+            messages.swap(messages_next);
+            return;
+        }
+    }
 
     // We compute two directed messages: target=0 => to v0 (eliminate v1), target=1 => to v1 (eliminate v0)
     for (int target = 0; target < 2; ++target) {
@@ -297,14 +430,15 @@ void Factor::computeMessages(double eta_damping) {
         lam_f_.noalias() = factor.lam();
 
         if (target == 0) {
-            // incorporate v1 belief - old message1
-            eta_f_.segment(d0_, d1_).noalias() += (adj_beliefs[1].eta() - old_eta1);
-            lam_f_.block(d0_, d0_, d1_, d1_).noalias() += (adj_beliefs[1].lam() - old_lam1);
+            const auto& b1 = adj_var_nodes[1]->belief;
+            eta_f_.segment(d0_, d1_).noalias() += (b1.eta() - old_eta1);
+            lam_f_.block(d0_, d0_, d1_, d1_).noalias() += (b1.lam() - old_lam1);
         } else {
-            // incorporate v0 belief - old message0
-            eta_f_.segment(0, d0_).noalias() += (adj_beliefs[0].eta() - old_eta0);
-            lam_f_.block(0, 0, d0_, d0_).noalias() += (adj_beliefs[0].lam() - old_lam0);
+            const auto& b0 = adj_var_nodes[0]->belief;
+            eta_f_.segment(0, d0_).noalias() += (b0.eta() - old_eta0);
+            lam_f_.block(0, 0, d0_, d0_).noalias() += (b0.lam() - old_lam0);
         }
+
 
         // ------------------------------------------------------------
         // 2) Views for this target
@@ -336,34 +470,24 @@ void Factor::computeMessages(double eta_damping) {
         if (llt_.info() != Eigen::Success) {
             throw std::runtime_error("LLT failed in Factor::computeMessages");
         }
-
         auto Y = Y_.topLeftCorner(d_no, d_o);
         Y.noalias() = llt_.solve(lnoo_view);
-
         auto y = y_.head(d_no);
         y.noalias() = llt_.solve(eno);
-
         // ------------------------------------------------------------
-        // 5) outLam/outEta: write into fixed buffers (no resize)
+        // 5) outLam/outEta: write DIRECTLY into messages_next[target]  [C]
         // ------------------------------------------------------------
-        Eigen::MatrixXd& outLam = new_lam_[target];
-        Eigen::VectorXd& outEta = new_eta_[target];
+        utils::NdimGaussian& outMsg = messages_next[target];
+        Eigen::MatrixXd& outLam = outMsg.lamRef();
+        Eigen::VectorXd& outEta = outMsg.etaRef();
 
-        // tmpLam = lono*Y (into top-left)
-        auto tmpLam = tmpLam_.topLeftCorner(d_o, d_o);
-        tmpLam.noalias() = lono_view * Y;
-
-        // outLam = loo - tmpLam
+        // outLam = loo - lono*Y   (NO intermediate tmp)
         outLam.noalias() = loo_view;
-        outLam.noalias() -= tmpLam;
+        outLam.noalias() -= (lono_view * Y);
 
-        // tmpEta = lono*y (into head)
-        auto tmpEta = tmpEta_.head(d_o);
-        tmpEta.noalias() = lono_view * y;
-
-        // outEta = eo - tmpEta
+        // outEta = eo - lono*y    (NO intermediate tmp)
         outEta.noalias() = eo;
-        outEta.noalias() -= tmpEta;
+        outEta.noalias() -= (lono_view * y);
 
         // ------------------------------------------------------------
         // 6) damping (in place)
@@ -383,11 +507,8 @@ void Factor::computeMessages(double eta_damping) {
         }
     }
 
-    // Commit outputs
-    messages[0].setLam(new_lam_[0]);
-    messages[0].setEta(new_eta_[0]);
-    messages[1].setLam(new_lam_[1]);
-    messages[1].setEta(new_eta_[1]);
+    // Commit outputs with O(1) swap (NO deep copy)  [C]
+    messages.swap(messages_next);
 }
 
 } // namespace gbp

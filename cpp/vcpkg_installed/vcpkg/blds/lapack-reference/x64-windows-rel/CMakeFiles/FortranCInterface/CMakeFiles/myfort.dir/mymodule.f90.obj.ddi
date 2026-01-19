@@ -1,0 +1,20 @@
+{
+	"revision" : 0,
+	"rules" : 
+	[
+		{
+			"outputs" : [],
+			"primary-output" : "CMakeFiles\\\\myfort.dir\\\\mymodule.f90.obj",
+			"provides" : 
+			[
+				{
+					"compiled-module-path" : "mymodule.mod",
+					"is-interface" : true,
+					"logical-name" : "mymodule.mod"
+				}
+			],
+			"requires" : []
+		}
+	],
+	"version" : 0
+}

@@ -26,8 +26,6 @@ class FactorGraph:
 
         self.n_var_nodes = 0
         self.n_factor_nodes = 0
-        self.n_edges = 0
-        self.n_msgs = 0
 
         self.nonlinear_factors = nonlinear_factors
 
@@ -72,7 +70,6 @@ class FactorGraph:
                     factor.compute_messages(factor.eta_damping)
                 else:
                     factor.compute_messages(self.eta_damping)
-                    self.n_msgs += 2
 
     def update_all_beliefs(self, vars=None, level=None, smoothing=False):
         if vars is None:
@@ -231,7 +228,122 @@ class FactorGraph:
             n_updates += 1
     """
 
-    def residual_iteration_var_heap(self):
+
+    # ================================================================
+    # Online / Incremental construction helpers
+    # ================================================================
+    # ===================== PATCHED: Remove duplicate global-scope methods =====================
+    # (No code here, just a marker for clarity)
+    def push_var(self, v, residual=1.0):
+        """
+        Push (or re-push) a variable into the residual heap.
+        We allow stale heap entries and skip them when popped.
+        """
+        r = float(residual)
+        self.var_residual[v] = r
+        heapq.heappush(self.var_heap, (-r, v.variableID, v))
+
+    def ensure_variable(self, variable_id, dofs=2, GT=None, tiny_prior=1e-6, init_mu=None, activate=True):
+        """
+        Get or create a variable with given id.
+        Used for online pose-graph growth.
+        """
+        if variable_id < len(self.var_nodes) and self.var_nodes[variable_id] is not None:
+            v = self.var_nodes[variable_id]
+            if GT is not None:
+                v.GT = np.array(GT, copy=True)
+            return v
+
+        while len(self.var_nodes) <= variable_id:
+            self.var_nodes.append(None)
+
+        v = VariableNode(variable_id, dofs=dofs)
+        v.type = "variable"
+
+        if GT is not None:
+            v.GT = np.array(GT, copy=True)
+
+        # tiny prior to avoid singularity
+        v.prior.lam = float(tiny_prior) * np.eye(dofs)
+        if init_mu is None:
+            v.prior.eta = np.zeros(dofs)
+        else:
+            init_mu = np.asarray(init_mu).reshape(-1)
+            v.prior.eta = v.prior.lam @ init_mu
+
+        v.update_belief()
+
+        self.var_nodes[variable_id] = v
+        self.n_var_nodes = max(self.n_var_nodes, variable_id + 1)
+        self.push_var(v, 1.0)
+        return v
+
+    def add_binary_factor(self, vi, vj, measurement, measurement_lambda,
+                          meas_fn, jac_fn, linpoint=None,
+                          ftype="base", activate=True):
+        """
+        Add a binary factor (odometry / loop closure) online.
+        """
+        fid = self.n_factor_nodes
+        f = Factor(fid, [vi, vj],
+                   measurement=measurement,
+                   measurement_lambda=measurement_lambda,
+                   meas_fn=meas_fn,
+                   jac_fn=jac_fn)
+        f.type = ftype
+
+        vi.adj_factors.append(f)
+        vj.adj_factors.append(f)
+
+        if linpoint is None:
+            linpoint = np.concatenate([vi.mu, vj.mu])
+        f.compute_factor(linpoint=linpoint, update_self=True)
+        f.compute_messages(eta_damping=0.0)
+
+        self.factors.append(f)
+        self.n_factor_nodes += 1
+        vi.update_belief()
+        vj.update_belief()
+
+        if activate:
+            self.push_var(vi, 1.0)
+            self.push_var(vj, 1.0)
+
+        return f
+
+    def add_unary_prior_factor(self, v, measurement, measurement_lambda,
+                               meas_fn, jac_fn, linpoint=None,
+                               ftype="prior", activate=True):
+        """
+        Add a unary prior / anchor factor online.
+        """
+        fid = self.n_factor_nodes
+        f = Factor(fid, [v],
+                   measurement=measurement,
+                   measurement_lambda=measurement_lambda,
+                   meas_fn=meas_fn,
+                   jac_fn=jac_fn)
+        f.type = ftype
+
+        v.adj_factors.append(f)
+
+        if linpoint is None:
+            linpoint = v.mu
+        f.compute_factor(linpoint=linpoint, update_self=True)
+        f.compute_messages(eta_damping=0.0)
+
+        self.factors.append(f)
+        self.n_factor_nodes += 1
+
+        v.update_belief()
+
+        if activate:
+            self.push_var(v, 1.0)
+
+        return f
+    
+
+    def residual_iteration_var_heap(self, max_updates=50):
         """
         Residual-based GBP iteration, priority queue on *variables*.
 
@@ -256,7 +368,7 @@ class FactorGraph:
         n_updates = 0
 
         # 本轮最多扩散 |V| 次；heap 空则提前结束
-        while (n_updates < len(self.var_nodes)) and len(self.var_heap) > 0:
+        while (n_updates < max_updates) and len(self.var_heap) > 0:
             neg_r_v, _, v = heapq.heappop(self.var_heap)
             r_v = -neg_r_v
 
@@ -285,7 +397,7 @@ class FactorGraph:
             # 本轮用 v 扩散过，视为 residual 清零
             self.var_residual[v] = 0.0
             n_updates += 1
-    
+
 
     def joint_distribution_inf(self):
         """
@@ -342,7 +454,7 @@ class FactorGraph:
         sigma = np.linalg.inv(lam)
         mu = sigma @ eta
         return mu, sigma
-    
+   
 
     def get_sigmas(self):
         """
@@ -726,3 +838,4 @@ class Factor:
     def __repr__(self):
         # 在 list / dict / debugger 里显示
         return f"Factor({self.factorID})"
+

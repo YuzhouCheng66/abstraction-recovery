@@ -1,0 +1,23 @@
+Detecting compiler hash for triplet x64-windows...
+Compiler found: D:/VS/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+The following packages are already installed:
+  * blas:x64-windows@2023-04-14#5 -- git+https://github.com/microsoft/vcpkg@240d6e92a04768c856492186df3e2b5f642c5e37
+  * lapack:x64-windows@2023-06-10#3 -- git+https://github.com/microsoft/vcpkg@12ac83a3627b42dd68a96751ec39051b89761656
+  * lapack-reference[blas-select,core,noblas]:x64-windows@3.12.1#2 -- git+https://github.com/microsoft/vcpkg@f50927961bf58450be5c919b3f2e66584cd6585c
+  * openblas:x64-windows@0.3.29 -- git+https://github.com/microsoft/vcpkg@3d3d198cfb372ccd328a36248c4c12fb7c6b3bb6
+  * suitesparse-amd:x64-windows@3.3.3 -- git+https://github.com/microsoft/vcpkg@a4fab6a86754a73637c653354bceef0bdea2bdc4
+  * suitesparse-camd:x64-windows@3.3.3 -- git+https://github.com/microsoft/vcpkg@c094131b109435ad56ab6d6f9417453c43dbacf9
+  * suitesparse-ccolamd:x64-windows@3.3.4 -- git+https://github.com/microsoft/vcpkg@8f5e5f4c7c2b0748f3aca63dac805e5a0b929b92
+    suitesparse-cholmod[core,partition,supernodal]:x64-windows@5.3.0 -- git+https://github.com/microsoft/vcpkg@d5b65e6c6db8bb75f0701ff5164a83556fb0cb2e
+  * suitesparse-colamd:x64-windows@3.3.4 -- git+https://github.com/microsoft/vcpkg@0be8cf0d5a1f0e153fd2d86087cfeba6b18bcc7f
+  * suitesparse-config:x64-windows@7.8.3 -- git+https://github.com/microsoft/vcpkg@e81b523e6d16c4af9d8abc86316b87da52e55eeb
+  * vcpkg-cmake:x64-windows@2024-04-23 -- git+https://github.com/microsoft/vcpkg@e74aa1e8f93278a8e71372f1fa08c3df420eb840
+  * vcpkg-cmake-config:x64-windows@2024-05-23 -- git+https://github.com/microsoft/vcpkg@97a63e4bc1a17422ffe4eff71da53b4b561a7841
+  * vcpkg-gfortran:x64-windows@3#3 -- git+https://github.com/microsoft/vcpkg@1af46bd54a9156a9f24fc7c8715488699522b382
+suitesparse-cholmod provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(CHOLMOD CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE SuiteSparse::CHOLMOD)
+
+All requested installations completed successfully in: 907 us

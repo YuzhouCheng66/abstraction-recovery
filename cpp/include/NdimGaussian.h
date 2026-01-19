@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <stdexcept>
 
 namespace utils {
 
@@ -10,31 +11,34 @@ public:
     using Vector = Eigen::VectorXd;
     using Matrix = Eigen::MatrixXd;
 
-    // 默认构造函数
-    NdimGaussian() : dim_(0), eta_(), lam_(), factored_(false) {}
-
-    // 构造函数：只给维度
+    // Constructors
+    NdimGaussian();
     explicit NdimGaussian(int dimensionality);
+    NdimGaussian(int dimensionality, const Vector& eta, const Matrix& lam);
 
-    // 构造函数：维度 + eta + lam
-    NdimGaussian(int dimensionality,
-                 const Vector& eta,
-                 const Matrix& lam);
-
+    // Dimension
     int dim() const { return dim_; }
 
-    // 访问器
-    const Vector& eta() const { return eta_; }
-    const Matrix& lam() const { return lam_; }
+    // Accessors (read-only)
+    const Vector& eta() const;
+    const Matrix& lam() const;
 
-    // 修改 eta / lam
+    // C-optimization: writable references (NO COPY)
+    // Any write invalidates cached factorization.
+    Vector& etaRef();
+    Matrix& lamRef();
+
+    // Setters (copy)
     void setEta(const Vector& eta);
     void setLam(const Matrix& lam);
 
-    // 信息形式 -> 均值 mu （解 lam * mu = eta）
+    // Optional: resize internal buffers to dimensionality and zero-initialize.
+    void resizeLikeDim(int dimensionality);
+
+    // Information form -> mean mu (solve lam * mu = eta)
     Vector mu();
 
-    // 信息形式 -> 协方差 Sigma （解 lam * Sigma = I）
+    // Information form -> covariance Sigma (solve lam * Sigma = I)
     Matrix Sigma();
 
 private:
@@ -42,11 +46,9 @@ private:
     Vector eta_;
     Matrix lam_;
 
-    // 是否已经做过 Cholesky 分解（对应 Python 的 self.c/self.lower）
     bool factored_;
-    Eigen::LLT<Matrix> llt_;   // Cholesky 分解缓存
+    Eigen::LLT<Matrix> llt_;
 
-    // 内部辅助：确保已经 factorize 过
     void ensureFactorized();
 };
 

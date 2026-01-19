@@ -1,0 +1,18 @@
+{
+	"revision" : 0,
+	"rules" : 
+	[
+		{
+			"outputs" : [],
+			"primary-output" : "SRC\\\\CMakeFiles\\\\lapack_obj.dir\\\\dlartg.f90.obj",
+			"provides" : [],
+			"requires" : 
+			[
+				{
+					"logical-name" : "la_constants.mod"
+				}
+			]
+		}
+	],
+	"version" : 0
+}

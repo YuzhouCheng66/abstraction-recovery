@@ -23,21 +23,21 @@ static std::atomic<long long> g_bottomUpAbs_setbelief_ns{0};
 static std::atomic<int> g_bottomUp_call_count{0};
 
 void printBottomUpProfile() {
-    int calls = g_bottomUp_call_count.load();
-    if (calls == 0) {
-        std::cout << "[BottomUp Profile] No calls recorded.\n";
-        return;
-    }
-    auto toMs = [](long long ns) { return ns / 1e6; };
-    std::cout << "\n=== BottomUp Detailed Profile (" << calls << " calls total) ===\n";
-    std::cout << "  [Super] belief copy (mu/Sigma/eta/lam build): " << toMs(g_bottomUp_belief_copy_ns.load()) << " ms\n";
-    std::cout << "  [Super] setLam/setEta:                        " << toMs(g_bottomUp_setLamEta_ns.load()) << " ms\n";
-    std::cout << "  [Super] lp build (linpoint concat):           " << toMs(g_bottomUp_lp_build_ns.load()) << " ms\n";
-    std::cout << "  [Super] computeFactor (meas+jac+linearize):   " << toMs(g_bottomUp_computeFactor_ns.load()) << " ms\n";
-    std::cout << "  [Abs]   projection (B'*mu, B'*Sigma*B, k):    " << toMs(g_bottomUpAbs_proj_ns.load()) << " ms\n";
-    std::cout << "  [Abs]   LLT + solve (lam=inv, eta=lam*mu):    " << toMs(g_bottomUpAbs_llt_ns.load()) << " ms\n";
-    std::cout << "  [Abs]   set belief/mu/Sigma:                  " << toMs(g_bottomUpAbs_setbelief_ns.load()) << " ms\n";
-    std::cout << "==========================================\n";
+    // int calls = g_bottomUp_call_count.load();
+    // if (calls == 0) {
+    //     std::cout << "[BottomUp Profile] No calls recorded.\n";
+    //     return;
+    // }
+    // auto toMs = [](long long ns) { return ns / 1e6; };
+    // std::cout << "\n=== BottomUp Detailed Profile (" << calls << " calls total) ===\n";
+    // std::cout << "  [Super] belief copy (mu/Sigma/eta/lam build): " << toMs(g_bottomUp_belief_copy_ns.load()) << " ms\n";
+    // std::cout << "  [Super] setLam/setEta:                        " << toMs(g_bottomUp_setLamEta_ns.load()) << " ms\n";
+    // std::cout << "  [Super] lp build (linpoint concat):           " << toMs(g_bottomUp_lp_build_ns.load()) << " ms\n";
+    // std::cout << "  [Super] computeFactor (meas+jac+linearize):   " << toMs(g_bottomUp_computeFactor_ns.load()) << " ms\n";
+    // std::cout << "  [Abs]   projection (B'*mu, B'*Sigma*B, k):    " << toMs(g_bottomUpAbs_proj_ns.load()) << " ms\n";
+    // std::cout << "  [Abs]   LLT + solve (lam=inv, eta=lam*mu):    " << toMs(g_bottomUpAbs_llt_ns.load()) << " ms\n";
+    // std::cout << "  [Abs]   set belief/mu/Sigma:                  " << toMs(g_bottomUpAbs_setbelief_ns.load()) << " ms\n";
+    // std::cout << "==========================================\n";
 }
 
 void resetBottomUpProfile() {
@@ -407,49 +407,63 @@ HierarchyGBP::buildSuperFromBase(const std::shared_ptr<FactorGraph>& base, doubl
     return layer;
 }
 
+
 void HierarchyGBP::bottomUpUpdateSuper(
     const std::shared_ptr<FactorGraph>& base,
-    const std::shared_ptr<SuperLayer>& super) {
-
-    ++g_bottomUp_call_count;
-
+    const std::shared_ptr<SuperLayer>& super)
+{
+    //++g_bottomUp_call_count;
     // 1) belief: block-diag copy base -> super
     const int n_super = static_cast<int>(super->groups.size());
+
     #pragma omp parallel for schedule(dynamic)
     for (int sid = 0; sid < n_super; ++sid) {
-        auto t0 = std::chrono::high_resolution_clock::now();
+        //auto t0 = std::chrono::high_resolution_clock::now();
 
         auto& sv = *super->graph->var_nodes[sid];
         const int D = super->total_dofs[sid];
 
-        Eigen::VectorXd eta = Eigen::VectorXd::Zero(D);
-        Eigen::MatrixXd lam = Eigen::MatrixXd::Zero(D, D);
+        // ---- ensure sizes only when needed (avoid realloc every iter) ----
+        // moments
+        if (sv.mu.size() != D) {
+            sv.mu.setZero(D);
+        }
+        // Sigma is block-diag; only need to guarantee off-diag stays 0.
+        // So we clear Sigma only when size changes.
+        if (sv.Sigma.rows() != D || sv.Sigma.cols() != D) {
+            sv.Sigma.setZero(D, D);   // one-time clear on resize
+        }
 
-        // Keep moments in sync without forcing LLT/inverse in NdimGaussian.
-        sv.mu.resize(D);
-        sv.Sigma.setZero(D, D);
+        // belief storage
+        sv.belief.resizeLikeDim(D);
+
+        // in-place references (avoid setLam/setEta copies)
+        auto& eta_ref = sv.belief.etaRef();
+        auto& lam_ref = sv.belief.lamRef();
+
+        // If you are 100% sure groups cover all blocks for this sid, you can omit this.
+        // Keeping it is safe and O(D), much cheaper than O(D^2).
+        eta_ref.setZero();
+
+        // IMPORTANT:
+        // Do NOT lam_ref.setZero(D,D) each iter (O(D^2)).
+        // Off-diag should have been zeroed when belief resized/initialized; we only overwrite diag blocks.
 
         for (int bid : super->groups[sid]) {
             auto& bv = *base->var_nodes[bid];
             const auto [off, d] = super->local_idx[sid].at(bid);
 
-            eta.segment(off, d) = bv.belief.eta();
-            lam.block(off, off, d, d) = bv.belief.lam();
+            // belief blocks
+            eta_ref.segment(off, d) = bv.belief.eta().head(d);
+            lam_ref.block(off, off, d, d) = bv.belief.lam().topLeftCorner(d, d);
 
-            // moments: block-diag copy
-            sv.mu.segment(off, d) = bv.mu;
-            sv.Sigma.block(off, off, d, d) = bv.Sigma;
+            // moments blocks
+            sv.mu.segment(off, d) = bv.mu.head(d);
+            sv.Sigma.block(off, off, d, d) = bv.Sigma.topLeftCorner(d, d);
         }
 
-        auto t1 = std::chrono::high_resolution_clock::now();
-        g_bottomUp_belief_copy_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-
-        // belief set (lam first to reset factorization)
-        sv.belief.setLam(lam);
-        sv.belief.setEta(eta);
-
-        auto t2 = std::chrono::high_resolution_clock::now();
-        g_bottomUp_setLamEta_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+        //auto t1 = std::chrono::high_resolution_clock::now();
+        //g_bottomUp_belief_copy_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     }
 
     // 2) relinearize all super factors at current concatenated mu
@@ -461,28 +475,31 @@ void HierarchyGBP::bottomUpUpdateSuper(
         Factor& f = *fptr;
         if (!f.active) continue;
 
-        auto t0 = std::chrono::high_resolution_clock::now();
+        //auto t0 = std::chrono::high_resolution_clock::now();
 
         // linpoint = concat mu of adj vars in order
-        int total = 0;
-        for (auto* v : f.adj_var_nodes) total += v->dofs;
-
-        static thread_local Eigen::VectorXd lp;
-        lp.resize(total);
+        // Reuse Factor's own preallocated linpoint buffer (allocated in Factor ctor).
+        Eigen::VectorXd& lp = f.linpoint;
 
         int c0 = 0;
         for (auto* v : f.adj_var_nodes) {
-            lp.segment(c0, v->dofs) = v->mu;
-            c0 += v->dofs;
+            const int d = v->dofs;
+            lp.segment(c0, d) = v->mu;
+            c0 += d;
         }
 
-        auto t1 = std::chrono::high_resolution_clock::now();
-        g_bottomUp_lp_build_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        // Optional debug check: ensure Factor's cached linpoint dimension matches adjacency dofs.
+        // assert(c0 == lp.size());
 
+        //auto t1 = std::chrono::high_resolution_clock::now();
+        //g_bottomUp_lp_build_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+
+        // Factor::computeFactor now avoids redundant self-copy when linpoint_in == f.linpoint.
         f.computeFactor(lp, true);
 
-        auto t2 = std::chrono::high_resolution_clock::now();
-        g_bottomUp_computeFactor_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+        //auto t2 = std::chrono::high_resolution_clock::now();
+        //g_bottomUp_computeFactor_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+
     }
 }
 
@@ -694,11 +711,12 @@ void HierarchyGBP::bottomUpUpdateAbs(
     abs->graph->eta_damping = eta_damping_abs;
 
     // Stage updated k vectors to avoid concurrent writes into unordered_map.
+    // NOTE: This is still Eigen::VectorXd per sid; we will at least avoid realloc in inner loop by move.
     std::vector<Eigen::VectorXd> new_ks;
     new_ks.resize(sup_fg->var_nodes.size());
 
-    // === 1) Update each abs variable (B fixed; match Python path A) ===
     const int n_sup_vars = static_cast<int>(sup_fg->var_nodes.size());
+
     #pragma omp parallel for schedule(dynamic)
     for (int vi = 0; vi < n_sup_vars; ++vi) {
         const auto& sn_uptr = sup_fg->var_nodes[vi];
@@ -707,7 +725,8 @@ void HierarchyGBP::bottomUpUpdateAbs(
 
         const int sid = sn.variableID;
         if (sid < 0) continue;
-        if (sid >= static_cast<int>(abs->graph->var_nodes.size()) || !abs->graph->var_nodes[sid]) continue;
+        if (sid >= static_cast<int>(abs->graph->var_nodes.size())) continue;
+        if (!abs->graph->var_nodes[sid]) continue;
 
         auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -717,34 +736,63 @@ void HierarchyGBP::bottomUpUpdateAbs(
         const Eigen::VectorXd& mu_sup = sn.mu;
         const Eigen::MatrixXd& Sigma_sup = sn.Sigma;
 
-        Eigen::VectorXd mu_abs = B.transpose() * mu_sup;
-        Eigen::MatrixXd Sigma_abs = B.transpose() * Sigma_sup * B;
+        // ---- thread-local workspaces (avoid repeated allocations) ----
+        static thread_local Eigen::VectorXd mu_abs;
+        static thread_local Eigen::VectorXd eta_abs;
+        static thread_local Eigen::MatrixXd Sigma_abs;
+        static thread_local Eigen::MatrixXd lam_abs;
+        static thread_local Eigen::MatrixXd I;
+
+        const int r = r_reduced;
+        if (mu_abs.size() != r) {
+            mu_abs.resize(r);
+            eta_abs.resize(r);
+            Sigma_abs.resize(r, r);
+            lam_abs.resize(r, r);
+            I.setIdentity(r, r);   // allocate+set once for this thread
+        } else if (I.rows() != r) {
+            // safety if r changes at runtime
+            I.setIdentity(r, r);
+        }
+
+        // ---- Projection ----
+        // mu_abs = B^T * mu_sup
+        mu_abs.noalias() = B.transpose() * mu_sup;
+
+        // Sigma_abs = B^T * Sigma_sup * B
+        // (still dense triple product; structural block optimization is the next step)
+        Sigma_abs.noalias() = B.transpose() * Sigma_sup * B;
 
         // k := mu_sup - B * mu_abs  (store after parallel)
-        new_ks[sid] = mu_sup - B * mu_abs;
+        // avoid extra temporaries by computing into new_ks[sid] directly
+        {
+            Eigen::VectorXd k;
+            k.resize(mu_sup.size());
+            k.noalias() = mu_sup - B * mu_abs;
+            new_ks[sid] = std::move(k);
+        }
 
         auto t1 = std::chrono::high_resolution_clock::now();
         g_bottomUpAbs_proj_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
 
-        // Convert to information form without explicit inverse
+        // ---- Information form without explicit inverse ----
         // lam_abs = Sigma_abs^{-1}, eta_abs = lam_abs * mu_abs
         Eigen::LLT<Eigen::MatrixXd> llt(Sigma_abs);
-        static thread_local Eigen::MatrixXd I;
-        I.resize(Sigma_abs.rows(), Sigma_abs.cols());
-        I.setIdentity();
-
-        Eigen::MatrixXd lam_abs = llt.solve(I);
-        Eigen::VectorXd eta_abs = lam_abs * mu_abs;
+        lam_abs.noalias() = llt.solve(I);
+        eta_abs.noalias() = lam_abs * mu_abs;
 
         auto t2 = std::chrono::high_resolution_clock::now();
         g_bottomUpAbs_llt_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
 
+        // ---- write back ----
         auto* v = abs->graph->var_nodes[sid].get();
         v->mu = mu_abs;
         v->Sigma = Sigma_abs;
 
-        v->belief.setLam(lam_abs);
-        v->belief.setEta(eta_abs);
+        // Avoid setLam/setEta copies
+        v->belief.resizeLikeDim(r);
+        v->belief.lamRef() = lam_abs;
+        v->belief.etaRef() = eta_abs;
 
         auto t3 = std::chrono::high_resolution_clock::now();
         g_bottomUpAbs_setbelief_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t3 - t2).count();
@@ -758,6 +806,7 @@ void HierarchyGBP::bottomUpUpdateAbs(
 
     // === 2) Re-linearize all abs factors ===
     const int n_abs_factors = static_cast<int>(abs->graph->factors.size());
+
     #pragma omp parallel for schedule(dynamic)
     for (int fi = 0; fi < n_abs_factors; ++fi) {
         auto& fptr = abs->graph->factors[fi];
@@ -765,17 +814,16 @@ void HierarchyGBP::bottomUpUpdateAbs(
         auto& f = *fptr;
         if (!f.active) continue;
 
-        int total = 0;
-        for (auto* v : f.adj_var_nodes) total += v->dofs;
-
-        static thread_local Eigen::VectorXd lp;
-        lp.resize(total);
+        // Reuse Factor's own linpoint buffer (already allocated in ctor)
+        Eigen::VectorXd& lp = f.linpoint;
 
         int c0 = 0;
         for (auto* v : f.adj_var_nodes) {
-            lp.segment(c0, v->dofs) = v->mu;
-            c0 += v->dofs;
+            const int d = v->dofs;
+            lp.segment(c0, d) = v->mu;
+            c0 += d;
         }
+
         f.computeFactor(lp, true);
     }
 }
@@ -806,8 +854,8 @@ void HierarchyGBP::topDownModifyBaseFromSuper(
         }
     }
 
-    // sid -> base ids is available as super->groups
     const int n_super_vars = static_cast<int>(super_graph.var_nodes.size());
+
     #pragma omp parallel for schedule(dynamic)
     for (int svi = 0; svi < n_super_vars; ++svi) {
         const auto& sv_up = super_graph.var_nodes[svi];
@@ -821,7 +869,6 @@ void HierarchyGBP::topDownModifyBaseFromSuper(
 
         const Eigen::VectorXd& mu_super = s_var.mu;
 
-        // split mu_super into base vars in group order
         int off = 0;
         for (int bid : base_ids) {
             VariableNode* v = nullptr;
@@ -829,7 +876,6 @@ void HierarchyGBP::topDownModifyBaseFromSuper(
             if (bid >= 0 && bid < static_cast<int>(id2var_base.size())) {
                 v = id2var_base[bid];
             }
-            // fallback: treat bid as index if base graph stores contiguous ids
             if (!v && bid >= 0 && bid < static_cast<int>(base_fg->var_nodes.size()) && base_fg->var_nodes[bid]) {
                 v = base_fg->var_nodes[bid].get();
             }
@@ -839,60 +885,75 @@ void HierarchyGBP::topDownModifyBaseFromSuper(
             if (d <= 0) continue;
             if (off + d > mu_super.size()) break;
 
-            const Eigen::VectorXd mu_child = mu_super.segment(off, d);
+            // ---- avoid mu_child copy: use segment ref ----
+            const Eigen::Ref<const Eigen::VectorXd> mu_child = mu_super.segment(off, d);
             off += d;
 
-            // delta formulation: lam unchanged, so d_eta = lam * d_mu
-            const Eigen::VectorXd mu_old = v->mu;
-            v->mu = mu_child;
+            // ---- compute d_mu cheaply (need old mu) ----
+            // Use a thread-local buffer to avoid alloc when computing d_mu/d_eta.
+            static thread_local Eigen::VectorXd d_mu;
+            static thread_local Eigen::VectorXd d_eta;
 
-            const Eigen::VectorXd d_mu = v->mu - mu_old;
-            if (d_mu.squaredNorm() == 0.0) {
-                // still keep weak prior in sync with current belief
-                const Eigen::VectorXd eta_now = v->belief.lam() * v->mu;
-                v->belief.setEta(eta_now);
-                v->prior.setEta(1e-10 * eta_now);
-                v->prior.setLam(1e-10 * v->belief.lam());
+            if (d_mu.size() != d) d_mu.resize(d);
+            if (d_eta.size() != d) d_eta.resize(d);
+
+            // d_mu = mu_child - mu_old
+            d_mu.noalias() = mu_child - v->mu.head(d);
+
+            // Update mu (store new)
+            v->mu.head(d) = mu_child;
+
+            // If no change: still sync eta/prior to lam*mu (same as your logic)
+            const double dm2 = d_mu.squaredNorm();
+            if (dm2 == 0.0) {
+                const Eigen::MatrixXd& lam = v->belief.lam();
+                // eta_now = lam * mu
+                v->belief.etaRef().noalias() = lam * v->mu;
+
+                // weak prior: 1e-10 * belief
+                v->prior.resizeLikeDim(d);
+                v->prior.etaRef().noalias() = 1e-10 * v->belief.eta();
+                v->prior.lamRef().noalias() = 1e-10 * lam;
                 continue;
             }
 
             const Eigen::MatrixXd& lam = v->belief.lam();
-            const Eigen::VectorXd d_eta = lam * d_mu;
 
-            // update belief eta (lam unchanged)
-            Eigen::VectorXd eta_new = v->belief.eta();
-            eta_new.noalias() += d_eta;
-            v->belief.setEta(eta_new);
+            // d_eta = lam * d_mu
+            d_eta.noalias() = lam * d_mu;
 
-            // weak prior (Python: 1e-10 * ...)
-            v->prior.setEta(1e-10 * eta_new);
-            v->prior.setLam(1e-10 * lam);
+            // belief eta in-place (lam unchanged)
+            v->belief.etaRef().noalias() += d_eta;
+
+            // weak prior in-place
+            v->prior.resizeLikeDim(d);
+            v->prior.etaRef().noalias() = 1e-10 * v->belief.eta();
+            v->prior.lamRef().noalias() = 1e-10 * lam;
 
             // sync to adjacent factors + correct messages (eta only; lam unchanged)
             const int n_adj = static_cast<int>(v->adj_factors.size());
             if (n_adj > 0) {
-                const Eigen::VectorXd d_eta_share = d_eta / static_cast<double>(n_adj);
+                const double inv_n = 1.0 / static_cast<double>(n_adj);
+
+                // d_eta_share = d_eta / n_adj
+                static thread_local Eigen::VectorXd d_eta_share;
+                if (d_eta_share.size() != d) d_eta_share.resize(d);
+                d_eta_share.noalias() = d_eta * inv_n;
 
                 for (const auto& ref : v->adj_factors) {
                     Factor* f = ref.factor;
                     const int idx = ref.local_idx;
                     if (!f) continue;
-                    if (idx < 0 || idx >= static_cast<int>(f->adj_beliefs.size())) continue;
                     if (idx < 0 || idx >= static_cast<int>(f->messages.size())) continue;
 
-                    // update cached adj_beliefs
-                    f->adj_beliefs[idx].setEta(v->belief.eta());
-                    f->adj_beliefs[idx].setLam(v->belief.lam());
-
-                    // correct corresponding message (eta only)
-                    Eigen::VectorXd msg_eta = f->messages[idx].eta();
-                    msg_eta.noalias() += d_eta_share;
-                    f->messages[idx].setEta(msg_eta);
+                    // in-place message eta update (no copy + no setEta)
+                    f->messages[idx].etaRef().noalias() += d_eta_share;
                 }
             }
         }
     }
 }
+
 
 // ============================================================================
 // Top-down: abs -> super  (Python: top_down_modify_super_graph)
@@ -906,6 +967,7 @@ void HierarchyGBP::topDownModifySuperFromAbs(
     auto& abs_graph = *abs->graph;
 
     const int n_sup_vars = static_cast<int>(sup_fg->var_nodes.size());
+
     #pragma omp parallel for schedule(dynamic)
     for (int svi = 0; svi < n_sup_vars; ++svi) {
         auto& sn_up = sup_fg->var_nodes[svi];
@@ -913,6 +975,7 @@ void HierarchyGBP::topDownModifySuperFromAbs(
         VariableNode* sn = sn_up.get();
         const int sid = sn->variableID;
 
+        // Lookup B and k
         auto itB = abs->Bs.find(sid);
         auto itk = abs->ks.find(sid);
         if (itB == abs->Bs.end() || itk == abs->ks.end()) continue;
@@ -920,68 +983,88 @@ void HierarchyGBP::topDownModifySuperFromAbs(
         const Eigen::MatrixXd& B = itB->second; // (d_s x r)
         const Eigen::VectorXd& k = itk->second; // (d_s)
 
-        // locate corresponding abs variable (same sid)
+        // Locate corresponding abs variable (same sid)
         VariableNode* an = nullptr;
         if (sid >= 0 && sid < static_cast<int>(abs_graph.var_nodes.size()) && abs_graph.var_nodes[sid]) {
             an = abs_graph.var_nodes[sid].get();
         } else {
-            // fallback search
+            // fallback search (rare path)
             for (auto& up : abs_graph.var_nodes) {
                 if (up && up->variableID == sid) { an = up.get(); break; }
             }
         }
         if (!an) continue;
 
-        // x_s = B x_a + k
-        const Eigen::VectorXd mu_new = B * an->mu + k;
+        const int d = sn->dofs;
+        if (d <= 0) continue;
 
-        // delta formulation: lam unchanged, so d_eta = lam * d_mu
-        const Eigen::VectorXd mu_old = sn->mu;
-        sn->mu = mu_new;
+        // ---- thread-local work buffers (avoid allocations) ----
+        static thread_local Eigen::VectorXd mu_new;
+        static thread_local Eigen::VectorXd d_mu;
+        static thread_local Eigen::VectorXd d_eta;
+        static thread_local Eigen::VectorXd d_eta_share;
 
-        const Eigen::VectorXd d_mu = sn->mu - mu_old;
-        if (d_mu.squaredNorm() == 0.0) {
-            const Eigen::VectorXd eta_now = sn->belief.lam() * sn->mu;
-            sn->belief.setEta(eta_now);
-            sn->prior.setEta(1e-10 * eta_now);
-            sn->prior.setLam(1e-10 * sn->belief.lam());
+        if (mu_new.size() != d) mu_new.resize(d);
+        if (d_mu.size()  != d) d_mu.resize(d);
+        if (d_eta.size() != d) d_eta.resize(d);
+        if (d_eta_share.size() != d) d_eta_share.resize(d);
+
+        // ---- compute mu_new = B * an->mu + k (no temp) ----
+        // Guard against dimension mismatch: use head(d) if needed
+        // (Assumes B has at least d rows and k has at least d entries)
+        mu_new.noalias() = B.topRows(d) * an->mu + k.head(d);
+
+        // ---- d_mu = mu_new - mu_old (mu_old is sn->mu) ----
+        d_mu.noalias() = mu_new - sn->mu.head(d);
+
+        // write back mu
+        sn->mu.head(d) = mu_new;
+
+        // If no change: sync eta/prior to lam*mu (same semantics as your code)
+        const double dm2 = d_mu.squaredNorm();
+        if (dm2 == 0.0) {
+            const Eigen::MatrixXd& lam0 = sn->belief.lam();
+            sn->belief.etaRef().noalias() = lam0 * sn->mu;   // full mu (same as before)
+
+            sn->prior.resizeLikeDim(d);
+            sn->prior.etaRef().noalias() = 1e-10 * sn->belief.eta();
+            sn->prior.lamRef().noalias() = 1e-10 * lam0;
             continue;
         }
 
         const Eigen::MatrixXd& lam = sn->belief.lam();
-        const Eigen::VectorXd d_eta = lam * d_mu;
 
-        // update belief eta (lam unchanged)
-        Eigen::VectorXd eta_new = sn->belief.eta();
-        eta_new.noalias() += d_eta;
-        sn->belief.setEta(eta_new);
+        // d_eta = lam * d_mu
+        // (lam is dxd; if lam bigger due to internal storage, use topLeftCorner)
+        d_eta.noalias() = lam.topLeftCorner(d, d) * d_mu;
 
-        // weak prior
-        sn->prior.setEta(1e-10 * eta_new);
-        sn->prior.setLam(1e-10 * lam);
+        // update belief eta in-place (lam unchanged)
+        sn->belief.etaRef().head(d).noalias() += d_eta;
+
+        // weak prior in-place
+        sn->prior.resizeLikeDim(d);
+        sn->prior.etaRef().noalias() = 1e-10 * sn->belief.eta().head(d);
+        sn->prior.lamRef().noalias() = 1e-10 * lam.topLeftCorner(d, d);
 
         // sync to adjacent factors + correct messages (eta only; lam unchanged)
         const int n_adj = static_cast<int>(sn->adj_factors.size());
         if (n_adj > 0) {
-            const Eigen::VectorXd d_eta_share = d_eta / static_cast<double>(n_adj);
+            const double inv_n = 1.0 / static_cast<double>(n_adj);
+            d_eta_share.noalias() = d_eta * inv_n;
 
             for (const auto& ref : sn->adj_factors) {
                 Factor* f = ref.factor;
                 const int idx = ref.local_idx;
                 if (!f) continue;
-                if (idx < 0 || idx >= static_cast<int>(f->adj_beliefs.size())) continue;
                 if (idx < 0 || idx >= static_cast<int>(f->messages.size())) continue;
 
-                f->adj_beliefs[idx].setEta(sn->belief.eta());
-                f->adj_beliefs[idx].setLam(sn->belief.lam());
-
-                Eigen::VectorXd msg_eta = f->messages[idx].eta();
-                msg_eta.noalias() += d_eta_share;
-                f->messages[idx].setEta(msg_eta);
+                // in-place message update (no copy + no setEta)
+                f->messages[idx].etaRef().head(d).noalias() += d_eta_share;
             }
         }
     }
 }
+
 
 
 void HierarchyGBP::vLoop(
@@ -995,66 +1078,75 @@ void HierarchyGBP::vLoop(
         return s.rfind(prefix, 0) == 0;
     };
 
-    // ---- bottom-up ----
-    // Python: for i in range(1, len(layers)):
+    // ---------------------------
+    // Python:
+    // layers[0]["graph"].synchronous_iteration()
+    // ---------------------------
+    layers[0].graph->synchronousIteration(false);
+
+    // ---------------------------
+    // bottom-up
+    // for i in range(1, len(layers)):
+    //   if super*: bottom_up_modify_super_graph(layers[:i+1])
+    //   elif abs*: bottom_up_modify_abs_graph(layers[:i+1])
+    //   if abs*: layers[i]["graph"].synchronous_iteration()
+    // ---------------------------
     for (size_t i = 1; i < layers.size(); ++i) {
         const std::string& name = layers[i].name;
 
-        // mirror Python:
-        // if name.startswith("super1"): pass
-        if (startsWith(name, "super1")) {
-            // do nothing (no bottom-up modify)
-            // but we still run one iteration below if graph exists
-        }
-        // elif name.startswith("super"): bottom_up_modify_super_graph(...)
-        else if (startsWith(name, "super")) {
-            // vLoop assumes layers are already built outside.
-            // So we only "modify/update", not build.
+        if (startsWith(name, "super")) {
+            // Update super using previous layer's graph
             if (layers[i].super && layers[i - 1].graph) {
                 bottomUpUpdateSuper(layers[i - 1].graph, layers[i].super);
                 layers[i].graph = layers[i].super->graph;
             }
-        }
-        // elif name.startswith("abs"): bottom_up_modify_abs_graph(...)
-        else if (startsWith(name, "abs")) {
+        } else if (startsWith(name, "abs")) {
+            // Update abs using previous layer's graph
             if (layers[i].abs && layers[i - 1].graph) {
                 bottomUpUpdateAbs(layers[i - 1].graph, layers[i].abs, r_reduced, eta_damping);
                 layers[i].graph = layers[i].abs->graph;
             }
         }
 
-        // After build/modify, one iteration per layer (non-base)
-        if (layers[i].graph) {
-            layers[i].graph->eta_damping = eta_damping;
+        // After build/update, one iteration per layer ONLY for abs
+        if (layers[i].graph && startsWith(name, "abs")) {
             layers[i].graph->synchronousIteration(false);
         }
     }
 
-    // ---- top-down ----
-    // Python: for i in range(len(layers)-1, 0, -1):
+    // ---------------------------
+    // top-down
+    // for i in range(len(layers)-1, 0, -1):
+    //   if abs*: layers[i]["graph"].synchronous_iteration()
+    //   if super*: top_down_modify_base_and_abs_graph(layers[:i+1])
+    //   elif abs*: top_down_modify_super_graph(layers[:i+1])
+    // ---------------------------
     for (size_t ii = layers.size(); ii-- > 1; ) {
-        // After one iteration per layer, reproject
-        if (layers[ii].graph) {
-            layers[ii].graph->eta_damping = eta_damping;
+        const std::string& name = layers[ii].name;
+
+        // extra iteration ONLY for abs layer (before projection)
+        if (layers[ii].graph && startsWith(name, "abs")) {
             layers[ii].graph->synchronousIteration(false);
         }
 
-        const std::string& name = layers[ii].name;
-
-        // Python:
-        // if name.startswith("super"): top_down_modify_base_and_abs_graph(...)
         if (startsWith(name, "super")) {
+            // Split super.mu back to previous layer (base or abs)
             if (layers[ii].super && layers[ii - 1].graph) {
                 topDownModifyBaseFromSuper(layers[ii - 1].graph, layers[ii].super);
             }
-        }
-        // elif name.startswith("abs"): top_down_modify_super_graph(...)
-        else if (startsWith(name, "abs")) {
+        } else if (startsWith(name, "abs")) {
+            // Project abs.mu back to previous super layer
             if (layers[ii].abs && layers[ii - 1].graph) {
                 topDownModifySuperFromAbs(layers[ii - 1].graph, layers[ii].abs);
             }
         }
     }
+
+    // ---------------------------
+    // Python:
+    // layers[0]["graph"].synchronous_iteration()
+    // ---------------------------
+    layers[0].graph->synchronousIteration(false);
 }
 
 

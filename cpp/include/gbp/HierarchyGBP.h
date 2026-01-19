@@ -89,15 +89,13 @@ public:
 // Top-down projection (match your Python top_down_modify_* functions)
 // ======================
 
-// From super down to base: split super.mu into base vars, update beliefs, and
-// adjust adjacent factors' adj_beliefs/messages (Python parity).
+// From super down to base: split super.mu into base vars, update beliefs.
 void topDownModifyBaseFromSuper(
     const std::shared_ptr<FactorGraph>& base_fg,
     const std::shared_ptr<SuperLayer>& super
 );
 
-// From abs down to super: lift abs mu back to super, update beliefs, and
-// adjust adjacent factors' adj_beliefs/messages (Python parity).
+// From abs down to super: lift abs mu back to super, update beliefs.
 void topDownModifySuperFromAbs(
     const std::shared_ptr<FactorGraph>& sup_fg,
     const std::shared_ptr<AbsLayer>& abs

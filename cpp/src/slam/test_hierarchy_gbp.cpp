@@ -153,7 +153,7 @@ int main() {
 
     // ---------------- hierarchy test params (only for testing) ----------------
     const int k_group = 10;          // order grouping: group size
-    const int super_iters = 500;     // run a few iters on super graph
+    const int super_iters = 5;     // run a few iters on super graph
     const double super_eta_damping = 0.0;
 
     std::cout << "Parameters:\n";
@@ -228,14 +228,10 @@ int main() {
         }
     }
 
-    // make factor-side adj_beliefs consistent once
-    gbp_graph.syncAllFactorAdjBeliefs();
-
     std::cout << "  ✓ Initialized\n\n";
 
     // ---------------- Step 3.5: Batch MAP baseline (sparse) ----------------
     std::cout << "Step 3.5: Computing batch MAP (sparse) baseline...\n";
-    t0 = std::chrono::high_resolution_clock::now();
 
     // (A) get var_ix mapping consistent with how jointMAPSparse stacks variables
     auto J = gbp_graph.jointDistributionInfSparse();
@@ -245,13 +241,8 @@ int main() {
 
     // (C) compute GT proxy energy for the batch MAP
     double e_opt = energyMapFromStackedMu(gbp_graph, mu_opt, J.var_ix);
-
-    t1 = std::chrono::high_resolution_clock::now();
-    ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
     std::cout << "  ✓ Batch MAP computed\n";
     std::cout << "  Batch-MAP proxy energy (vs GT): " << std::fixed << std::setprecision(6) << e_opt << "\n";
-    std::cout << "  Time: " << ms << " ms\n\n";
 
     // ---------------- Step 4: run GBP iterations ----------------
     gbp_graph.eta_damping = 0.0;  // match你的当前实验设置
@@ -273,9 +264,12 @@ int main() {
     std::chrono::duration<double> sync_total(0);
     int sync_iters = 0;
 
+    gbp_graph.synchronousIteration();   // warm-up
     for (int it = 0; it < max_iters; ++it) {
         auto sync_start = std::chrono::high_resolution_clock::now();
-        gbp_graph.synchronousIteration();
+        gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
+        //gbp_graph.synchronousIteration();
+        //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
         auto sync_end = std::chrono::high_resolution_clock::now();
         sync_total += (sync_end - sync_start);
         ++sync_iters;
@@ -527,104 +521,103 @@ int main() {
 
     for (int it = 0; it < 500; ++it) {
         auto vloop_start = std::chrono::high_resolution_clock::now();
-        
-        // ========== BOTTOM-UP ==========
+        H.vLoop(vLayers, 2, 0.0);
+        /*
+        // ========== BOTTOM-UP ========== //
         auto t0 = std::chrono::high_resolution_clock::now();
-        
+
         // super1: no bottom-up modify, just iteration
         auto t1 = std::chrono::high_resolution_clock::now();
         vLayers[1].graph->synchronousIteration(false);
         auto t2 = std::chrono::high_resolution_clock::now();
         t_super1_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         // abs1: bottom-up update + iteration
         t1 = std::chrono::high_resolution_clock::now();
-        H.bottomUpUpdateAbs(vLayers[1].graph, abs1, /*r_reduced=*/2, /*eta_damping=*/0.0);
+        H.bottomUpUpdateAbs(vLayers[1].graph, abs1, 2, 0.0);
         vLayers[2].graph = abs1->graph;
         t2 = std::chrono::high_resolution_clock::now();
         t_abs1_bottomUp += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[2].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_abs1_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         // super2: bottom-up update + iteration
         t1 = std::chrono::high_resolution_clock::now();
         H.bottomUpUpdateSuper(vLayers[2].graph, super2);
         vLayers[3].graph = super2->graph;
         t2 = std::chrono::high_resolution_clock::now();
         t_super2_bottomUp += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[3].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_super2_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         // abs2: bottom-up update + iteration
         t1 = std::chrono::high_resolution_clock::now();
-        H.bottomUpUpdateAbs(vLayers[3].graph, abs2, /*r_reduced=*/2, /*eta_damping=*/0.0);
+        H.bottomUpUpdateAbs(vLayers[3].graph, abs2, 2, 0.0);
         vLayers[4].graph = abs2->graph;
         t2 = std::chrono::high_resolution_clock::now();
         t_abs2_bottomUp += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[4].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_abs2_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
-        // ========== TOP-DOWN ==========
+
+        // ========== TOP-DOWN ========== //
         // abs2: iteration + top-down to super2
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[4].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_abs2_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         H.topDownModifySuperFromAbs(vLayers[3].graph, abs2);
         t2 = std::chrono::high_resolution_clock::now();
         t_abs2_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         // super2: iteration + top-down to abs1
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[3].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_super2_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         H.topDownModifyBaseFromSuper(vLayers[2].graph, super2);
         t2 = std::chrono::high_resolution_clock::now();
         t_super2_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         // abs1: iteration + top-down to super1
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[2].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_abs1_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         H.topDownModifySuperFromAbs(vLayers[1].graph, abs1);
         t2 = std::chrono::high_resolution_clock::now();
         t_abs1_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         // super1: iteration + top-down to base
         t1 = std::chrono::high_resolution_clock::now();
         vLayers[1].graph->synchronousIteration(false);
         t2 = std::chrono::high_resolution_clock::now();
         t_super1_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
-        
+
         t1 = std::chrono::high_resolution_clock::now();
         H.topDownModifyBaseFromSuper(vLayers[0].graph, super1);
         t2 = std::chrono::high_resolution_clock::now();
         t_super1_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
-
+        */
         auto vloop_end = std::chrono::high_resolution_clock::now();
-
         vloop_total += (vloop_end - vloop_start);
         ++iters_done;
-
         double vloop_ms = std::chrono::duration<double, std::milli>(vloop_end - vloop_start).count();
-
+        
         const double energy = energyMapFromGraphMu(*vLayers[0].graph);
         const double gap_to_map = energy - e_opt;
         if ((it + 1) % 10 == 0 || it < 20) {
@@ -644,36 +637,36 @@ int main() {
     }
 
     double avg_vloop_ms = (iters_done > 0) ? (1000.0 * vloop_total.count() / iters_done) : 0.0;
-    std::cout << "  ✓ V-loop demo finished.\n";
-    std::cout << "  Total V-loop time: " << std::fixed << std::setprecision(0)
+        std::cout << "  ✓ V-loop demo finished.\n";
+        std::cout << "  Total V-loop time: " << std::fixed << std::setprecision(0)
             << (1000.0 * vloop_total.count()) << " ms\n";
-    std::cout << "  Average vLoop() time per iter: " << std::setprecision(3) << avg_vloop_ms << " ms\n";
+        std::cout << "  Average vLoop() time per iter: " << std::setprecision(3) << avg_vloop_ms << " ms\n";
 
-    // Print detailed profiling
-    std::cout << "\n=== V-Loop Detailed Profiling (avg per iteration) ===\n";
-    std::cout << std::fixed << std::setprecision(4);
-    std::cout << "  [BOTTOM-UP]\n";
-    std::cout << "    super1: iter=" << (t_super1_iter / iters_done) << " ms\n";
-    std::cout << "    abs1:   bottomUp=" << (t_abs1_bottomUp / iters_done) << " ms, iter=" << (t_abs1_iter / iters_done) << " ms\n";
-    std::cout << "    super2: bottomUp=" << (t_super2_bottomUp / iters_done) << " ms, iter=" << (t_super2_iter / iters_done) << " ms\n";
-    std::cout << "    abs2:   bottomUp=" << (t_abs2_bottomUp / iters_done) << " ms, iter=" << (t_abs2_iter / iters_done) << " ms\n";
-    std::cout << "  [TOP-DOWN]\n";
-    std::cout << "    abs2:   iter=" << (t_abs2_topDown_iter / iters_done) << " ms, topDown=" << (t_abs2_topDown / iters_done) << " ms\n";
-    std::cout << "    super2: iter=" << (t_super2_topDown_iter / iters_done) << " ms, topDown=" << (t_super2_topDown / iters_done) << " ms\n";
-    std::cout << "    abs1:   iter=" << (t_abs1_topDown_iter / iters_done) << " ms, topDown=" << (t_abs1_topDown / iters_done) << " ms\n";
-    std::cout << "    super1: iter=" << (t_super1_topDown_iter / iters_done) << " ms, topDown=" << (t_super1_topDown / iters_done) << " ms\n";
+        // Print detailed profiling（已注释）
+        // std::cout << "\n=== V-Loop Detailed Profiling (avg per iteration) ===\n";
+        // std::cout << std::fixed << std::setprecision(4);
+        // std::cout << "  [BOTTOM-UP]\n";
+        // std::cout << "    super1: iter=" << (t_super1_iter / iters_done) << " ms\n";
+        // std::cout << "    abs1:   bottomUp=" << (t_abs1_bottomUp / iters_done) << " ms, iter=" << (t_abs1_iter / iters_done) << " ms\n";
+        // std::cout << "    super2: bottomUp=" << (t_super2_bottomUp / iters_done) << " ms, iter=" << (t_super2_iter / iters_done) << " ms\n";
+        // std::cout << "    abs2:   bottomUp=" << (t_abs2_bottomUp / iters_done) << " ms, iter=" << (t_abs2_iter / iters_done) << " ms\n";
+        // std::cout << "  [TOP-DOWN]\n";
+        // std::cout << "    abs2:   iter=" << (t_abs2_topDown_iter / iters_done) << " ms, topDown=" << (t_abs2_topDown / iters_done) << " ms\n";
+        // std::cout << "    super2: iter=" << (t_super2_topDown_iter / iters_done) << " ms, topDown=" << (t_super2_topDown / iters_done) << " ms\n";
+        // std::cout << "    abs1:   iter=" << (t_abs1_topDown_iter / iters_done) << " ms, topDown=" << (t_abs1_topDown / iters_done) << " ms\n";
+        // std::cout << "    super1: iter=" << (t_super1_topDown_iter / iters_done) << " ms, topDown=" << (t_super1_topDown / iters_done) << " ms\n";
     
-    double total_bottomUp = t_super1_iter + t_abs1_bottomUp + t_abs1_iter + t_super2_bottomUp + t_super2_iter + t_abs2_bottomUp + t_abs2_iter;
-    double total_topDown = t_abs2_topDown_iter + t_abs2_topDown + t_super2_topDown_iter + t_super2_topDown + t_abs1_topDown_iter + t_abs1_topDown + t_super1_topDown_iter + t_super1_topDown;
-    std::cout << "  [SUMMARY]\n";
-    std::cout << "    Total bottom-up avg: " << (total_bottomUp / iters_done) << " ms\n";
-    std::cout << "    Total top-down avg:  " << (total_topDown / iters_done) << " ms\n";
+    //double total_bottomUp = t_super1_iter + t_abs1_bottomUp + t_abs1_iter + t_super2_bottomUp + t_super2_iter + t_abs2_bottomUp + t_abs2_iter;
+    //double total_topDown = t_abs2_topDown_iter + t_abs2_topDown + t_super2_topDown_iter + t_super2_topDown + t_abs1_topDown_iter + t_abs1_topDown + t_super1_topDown_iter + t_super1_topDown;
+    //std::cout << "  [SUMMARY]\n";
+    //std::cout << "    Total bottom-up avg: " << (total_bottomUp / iters_done) << " ms\n";
+    //std::cout << "    Total top-down avg:  " << (total_topDown / iters_done) << " ms\n";
 
     // Print detailed bottomUp profile
-    printBottomUpProfile();
+    // printBottomUpProfile();
 
     // Print detailed computeFactor profile
-    printComputeFactorProfile();
+    // printComputeFactorProfile();
 
     std::cout << "\n=== Test Complete ===\n";
     return 0;

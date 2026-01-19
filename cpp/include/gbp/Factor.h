@@ -1,15 +1,20 @@
 #pragma once
+
 #include <Eigen/Dense>
 #include <Eigen/Cholesky>
 #include <vector>
 #include <cassert>
 #include <functional>
 #include <stdexcept>
+
 #include "NdimGaussian.h"
+
 
 // Profiling utilities for computeFactor analysis
 void printComputeFactorProfile();
 void resetComputeFactorProfile();
+
+//
 
 namespace gbp {
 
@@ -23,8 +28,9 @@ public:
     std::vector<VariableNode*> adj_var_nodes;
     std::vector<int> adj_vIDs;
 
-    std::vector<utils::NdimGaussian> adj_beliefs;
+    // Factor-to-variable messages (ping-pong buffers for C optimization)
     std::vector<utils::NdimGaussian> messages;
+    std::vector<utils::NdimGaussian> messages_next;
 
     std::vector<Eigen::VectorXd> measurement;         // z_i
     std::vector<Eigen::MatrixXd> measurement_lambda;  // Λ_i
@@ -46,7 +52,6 @@ public:
         std::function<std::vector<Eigen::MatrixXd>(const Eigen::VectorXd&)>  jac
     );
 
-    void syncAdjBeliefsFromVariables();
     void computeFactor(const Eigen::VectorXd& linpoint, bool update_self = true);
     // Jacobian/Lambda cache control (use when structure changes)
     void invalidateJacobianCache();
@@ -89,18 +94,16 @@ private:
 
     Eigen::LLT<Eigen::MatrixXd> llt_;  // reusable factorization object
 
-    // Temporaries for msg_lam/msg_eta isolation (optional but keep for parity)
+    // Temporaries (kept for potential parity / debugging; not required by C)
     Eigen::MatrixXd tmpLam_;     // size: max_o x max_o
     Eigen::VectorXd tmpEta_;     // size: max_o
 
     // ==========================
     // computeFactor workspace
     // ==========================
-    // Reuse eta_f_/lam_f_ as (eta_factor/lambda_factor) accumulators.
     Eigen::VectorXd ri_cf_;      // residual per measurement block (m)
     Eigen::VectorXd tmpv_cf_;    // tmp vector: Oi * ri (m)
     Eigen::MatrixXd tmpm_cf_;    // tmp matrix: Oi * Ji (m x D)
-
 
     // ==========================
     // Jacobian / Lambda cache (J assumed constant across iterations)
@@ -110,10 +113,6 @@ private:
     std::vector<Eigen::MatrixXd> J_cache_;   // blocks Ji (m x D)
     std::vector<Eigen::MatrixXd> JO_cache_;  // blocks (Ji^T * Oi) (D x m)
     Eigen::MatrixXd lambda_cache_;           // sum_i (Ji^T * Oi * Ji) (D x D)
-
-    // Outputs (allocated once)
-    Eigen::VectorXd new_eta_[2]; // size: d0_ / d1_
-    Eigen::MatrixXd new_lam_[2]; // size: d0_xd0 / d1_xd1
 
 private:
     void initWorkspace_();

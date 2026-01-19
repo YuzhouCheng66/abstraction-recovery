@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/include",
                 "${workspaceFolder}/external/eigen",
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/suitesparse"
             ],
             "defines": [
                 "_DEBUG",

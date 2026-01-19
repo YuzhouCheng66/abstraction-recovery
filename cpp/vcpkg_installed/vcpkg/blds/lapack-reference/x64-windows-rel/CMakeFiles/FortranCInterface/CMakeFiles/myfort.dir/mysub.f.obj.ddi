@@ -1,0 +1,13 @@
+{
+	"revision" : 0,
+	"rules" : 
+	[
+		{
+			"outputs" : [],
+			"primary-output" : "CMakeFiles\\\\myfort.dir\\\\mysub.f.obj",
+			"provides" : [],
+			"requires" : []
+		}
+	],
+	"version" : 0
+}

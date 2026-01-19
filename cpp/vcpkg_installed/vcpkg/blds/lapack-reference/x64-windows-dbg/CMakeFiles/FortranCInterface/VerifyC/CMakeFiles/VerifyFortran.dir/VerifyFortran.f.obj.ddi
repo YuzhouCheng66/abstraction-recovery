@@ -1,0 +1,13 @@
+{
+	"revision" : 0,
+	"rules" : 
+	[
+		{
+			"outputs" : [],
+			"primary-output" : "CMakeFiles\\\\VerifyFortran.dir\\\\VerifyFortran.f.obj",
+			"provides" : [],
+			"requires" : []
+		}
+	],
+	"version" : 0
+}

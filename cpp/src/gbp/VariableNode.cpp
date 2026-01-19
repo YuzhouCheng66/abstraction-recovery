@@ -54,6 +54,54 @@ void VariableNode::updateBelief() {
     // Ensure caches are allocated once and match dofs
     ensureCache_();
 
+    // ------------------------------------------------------------
+    // Fast path: 2D variables (fixed-size Eigen kernels)
+    //   - Avoid dynamic-size Eigen overhead for the common dofs==2 case
+    //   - Still uses LLT.solve (no explicit inverse)
+    // ------------------------------------------------------------
+    if (dofs == 2) {
+        using Vec2 = Eigen::Matrix<double, 2, 1>;
+        using Mat2 = Eigen::Matrix<double, 2, 2>;
+
+        Vec2 eta2 = prior.eta().head<2>();
+        Mat2 lam2 = prior.lam().topLeftCorner<2, 2>();
+
+        for (const auto& aref : adj_factors) {
+            const Factor* f = aref.factor;
+            const int k = aref.local_idx;
+
+            assert(f != nullptr);
+            assert(k >= 0 && k < (int)f->messages.size());
+
+            eta2.noalias() += f->messages[k].eta().head<2>();
+            lam2.noalias() += f->messages[k].lam().topLeftCorner<2, 2>();
+        }
+
+        // Write belief (information form) without extra copies
+        belief.etaRef().head<2>() = eta2;
+        belief.lamRef().topLeftCorner<2, 2>() = lam2;
+
+        // Solve for mu (and optionally Sigma) using fixed-size LLT
+        Eigen::LLT<Mat2> llt2;
+        llt2.compute(lam2);
+        if (llt2.info() != Eigen::Success) {
+            lam2(0, 0) += kJitter;
+            lam2(1, 1) += kJitter;
+            llt2.compute(lam2);
+            if (llt2.info() != Eigen::Success) {
+                throw std::runtime_error("VariableNode::updateBelief (2D): LLT failed (matrix not SPD?)");
+            }
+        }
+
+        mu.head<2>().noalias() = llt2.solve(eta2);
+
+        if (compute_sigma_) {
+            const Mat2 I2 = Mat2::Identity();
+            Sigma.topLeftCorner<2, 2>().noalias() = llt2.solve(I2);
+        }
+        return;
+    }
+
     // -------------------------
     // Accumulate belief in scratch (information form):
     //   eta_acc = prior.eta + sum_k msg_k.eta
@@ -74,22 +122,27 @@ void VariableNode::updateBelief() {
         lam_acc_.noalias() += f->messages[k].lam();
     }
 
-    // Write back to belief (keep external semantics identical)
-    belief.setEta(eta_acc_);
-    belief.setLam(lam_acc_);
+    // ---- VA: write belief without setEta/setLam overhead (no extra copies) ----
+    belief.etaRef().noalias() = eta_acc_;
+    belief.lamRef().noalias() = lam_acc_;
 
     // -------------------------
     // Compute mu, Sigma from belief (SPD expected):
     //   (lam + jitter*I) * mu    = eta
     //   (lam + jitter*I) * Sigma = I
     // -------------------------
-    lam_work_.noalias() = lam_acc_;
-    lam_work_.diagonal().array() += kJitter;
-
-    llt_.compute(lam_work_);
+    // ---- VB: avoid lam_work_ copy unless LLT fails ----
+    // Try factorization without jitter first (common case: SPD already)
+    llt_.compute(lam_acc_);
     if (llt_.info() != Eigen::Success) {
-        throw std::runtime_error("VariableNode::updateBelief: LLT failed (matrix not SPD?)");
+        lam_work_.noalias() = lam_acc_;
+        lam_work_.diagonal().array() += kJitter;
+        llt_.compute(lam_work_);
+        if (llt_.info() != Eigen::Success) {
+            throw std::runtime_error("VariableNode::updateBelief: LLT failed (matrix not SPD?)");
+        }
     }
+
 
     // mu = inv(lam)*eta
     mu.noalias() = llt_.solve(eta_acc_);
@@ -98,22 +151,7 @@ void VariableNode::updateBelief() {
     if (compute_sigma_) {
         Sigma.noalias() = llt_.solve(I_);
     }
-}
 
-void VariableNode::sendBeliefToFactors() {
-    if (!active) return;
-
-    for (const auto& aref : adj_factors) {
-        Factor* f = aref.factor;
-        const int k = aref.local_idx;
-
-        assert(f != nullptr);
-        assert(k >= 0 && k < (int)f->adj_beliefs.size());
-
-        // Push current belief to factor cache
-        f->adj_beliefs[k].setEta(belief.eta());
-        f->adj_beliefs[k].setLam(belief.lam());
-    }
 }
 
 } // namespace gbp

@@ -147,8 +147,6 @@ int main() {
         }
     }
 
-    // make factor-side adj_beliefs consistent once
-    gbp_graph.syncAllFactorAdjBeliefs();
 
     std::cout << "  ✓ Initialized\n\n";
 

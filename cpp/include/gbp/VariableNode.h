@@ -43,7 +43,6 @@ public:
 
     // Main routines
     void updateBelief();          // prior + sum incoming factor->messages[local_idx]
-    void sendBeliefToFactors();   // Send updated belief to adjacent factors' adj_beliefs
 
     // Optional performance knob:
     // - Default: keep same semantics as before (compute Sigma every update).

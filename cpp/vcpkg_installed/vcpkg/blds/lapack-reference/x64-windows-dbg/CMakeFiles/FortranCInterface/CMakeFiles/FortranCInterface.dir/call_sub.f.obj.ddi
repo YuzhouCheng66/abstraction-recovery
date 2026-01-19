@@ -1,0 +1,13 @@
+{
+	"revision" : 0,
+	"rules" : 
+	[
+		{
+			"outputs" : [],
+			"primary-output" : "CMakeFiles\\\\FortranCInterface.dir\\\\call_sub.f.obj",
+			"provides" : [],
+			"requires" : []
+		}
+	],
+	"version" : 0
+}

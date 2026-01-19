@@ -1,0 +1,13 @@
+{
+	"revision" : 0,
+	"rules" : 
+	[
+		{
+			"outputs" : [],
+			"primary-output" : "SRC\\\\CMakeFiles\\\\lapack_obj.dir\\\\dgesvj.f.obj",
+			"provides" : [],
+			"requires" : []
+		}
+	],
+	"version" : 0
+}
