@@ -380,10 +380,11 @@ gbp::FactorGraph::JointInfResult gbp::FactorGraph::jointDistributionInfSparse() 
                         }
                     }
                 }
-
+                
                 other_factor_ix += db;
             }
 
+            factor_ix += da;
             factor_ix += da;
         }
     }
