@@ -1,0 +1,8 @@
+# CMake / build artifacts
+cpp/build/
+cpp/build-*/
+*.lib
+*.dll
+*.exe
+*.obj
+*.pdb
