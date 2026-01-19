@@ -267,8 +267,8 @@ int main() {
     gbp_graph.synchronousIteration();   // warm-up
     for (int it = 0; it < max_iters; ++it) {
         auto sync_start = std::chrono::high_resolution_clock::now();
-        gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
-        //gbp_graph.synchronousIteration();
+        //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
+        gbp_graph.synchronousIteration();
         //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
         auto sync_end = std::chrono::high_resolution_clock::now();
         sync_total += (sync_end - sync_start);
