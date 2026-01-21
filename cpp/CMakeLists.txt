@@ -92,3 +92,11 @@ target_link_libraries(test_hierarchy_gbp PRIVATE ndim_gaussian slam_graph)
 # (Optional but harmless) also add lib search path at the executable level.
 # This helps if you later move SuiteSparse linking from ndim_gaussian to the exe.
 target_link_directories(test_hierarchy_gbp PRIVATE "${VCPKG_LIB_DIR}")
+
+# Nonlinear SE(2) GN / GBP / V-loop test
+add_executable(test_hierarchy_gbp_nonlinear
+  src/slam/test_hierarchy_gbp_nonlinear.cpp
+)
+
+target_link_libraries(test_hierarchy_gbp_nonlinear PRIVATE ndim_gaussian slam_graph)
+target_link_directories(test_hierarchy_gbp_nonlinear PRIVATE "${VCPKG_LIB_DIR}")

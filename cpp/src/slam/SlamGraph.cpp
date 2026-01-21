@@ -141,4 +141,137 @@ std::vector<Layer> initLayers(
     return layers;
 }
 
+
+// ============================================================
+// SE(2) graph generation
+// ============================================================
+
+static inline double wrapAngleSE2(double a) {
+    return std::atan2(std::sin(a), std::cos(a)); // (-pi, pi]
+}
+
+SlamGraphSE2 makeSlamLikeGraphSE2(
+    int N,
+    double step_size,
+    double loop_prob,
+    double loop_radius,
+    double prior_prop,
+    unsigned int seed,
+    bool use_seed)
+{
+    SlamGraphSE2 graph;
+    if (N <= 0) return graph;
+
+    std::mt19937 rng(use_seed ? seed : std::random_device{}());
+    std::normal_distribution<double> normal01(0.0, 1.0);
+    std::uniform_real_distribution<double> uniform01(0.0, 1.0);
+
+    // --- SE(2) trajectory (smooth heading random walk) ---
+    // Python: TURN_STD = 1 rad/step
+    const double TURN_STD = 1.0;
+
+    std::vector<Eigen::Vector3d> poses;
+    poses.reserve(N);
+
+    double x = 0.0, y = 0.0, th = 0.0;
+    poses.push_back(Eigen::Vector3d(x, y, th));
+
+    for (int i = 1; i < N; ++i) {
+        double dth = normal01(rng) * TURN_STD;
+        th = wrapAngleSE2(th + dth);
+        x += step_size * std::cos(th);
+        y += step_size * std::sin(th);
+        poses.push_back(Eigen::Vector3d(x, y, th));
+    }
+
+    // --- nodes ---
+    graph.nodes.reserve(N);
+    for (int i = 0; i < N; ++i) {
+        SlamNodeSE2 node;
+        node.id = i;
+        node.layer = 0;
+        node.dim = 3;
+        node.GT = poses[i];
+        node.position = poses[i].head<2>();
+        graph.nodes.push_back(node);
+    }
+
+    // --- sequential edges (i -> i+1) ---
+    for (int i = 0; i < N - 1; ++i) {
+        SlamEdge e(i, i + 1);
+        graph.edges.push_back(e);
+    }
+
+    // --- loop closures ---
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 5; j < N; ++j) {
+            if (uniform01(rng) < loop_prob) {
+                double xi = poses[i][0];
+                double yi = poses[i][1];
+                double xj = poses[j][0];
+                double yj = poses[j][1];
+                double dist = std::hypot(xi - xj, yi - yj);
+                if (dist < loop_radius) {
+                    SlamEdge e(i, j);
+                    graph.edges.push_back(e);
+                }
+            }
+        }
+    }
+
+    // --- strong prior node selection ---
+    std::vector<int> strong_ids;
+    if (prior_prop <= 0.0) {
+        strong_ids = {0};
+    } else if (prior_prop >= 1.0) {
+        strong_ids.resize(N);
+        std::iota(strong_ids.begin(), strong_ids.end(), 0);
+    } else {
+        int k = std::max(1, static_cast<int>(std::floor(prior_prop * N)));
+        std::vector<int> all_ids(N);
+        std::iota(all_ids.begin(), all_ids.end(), 0);
+        std::shuffle(all_ids.begin(), all_ids.end(), rng);
+        strong_ids.insert(strong_ids.end(), all_ids.begin(), all_ids.begin() + k);
+    }
+
+    // --- prior edges ---
+    for (int id : strong_ids) {
+        SlamEdge prior_e;
+        prior_e.source = id;
+        prior_e.target = -1;     // marker for prior
+        prior_e.is_prior = true;
+        prior_e.is_anchor = false;
+        graph.edges.push_back(prior_e);
+    }
+
+    // --- anchor edge (always) ---
+    {
+        SlamEdge anchor_e;
+        anchor_e.source = 0;
+        anchor_e.target = -2;    // marker for anchor
+        anchor_e.is_prior = true;
+        anchor_e.is_anchor = true;
+        graph.edges.push_back(anchor_e);
+    }
+
+    return graph;
+}
+
+std::vector<LayerSE2> initLayersSE2(
+    int N,
+    double step_size,
+    double loop_prob,
+    double loop_radius,
+    double prior_prop,
+    unsigned int seed,
+    bool use_seed)
+{
+    std::vector<LayerSE2> layers;
+    LayerSE2 base_layer;
+    base_layer.name = "base";
+    base_layer.graph = makeSlamLikeGraphSE2(N, step_size, loop_prob, loop_radius, prior_prop, seed, use_seed);
+    layers.push_back(base_layer);
+    return layers;
+}
+
 } // namespace slam

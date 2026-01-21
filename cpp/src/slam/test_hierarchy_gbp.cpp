@@ -142,7 +142,7 @@ int main() {
     std::cout << "=== Large-Scale SLAM Graph Convergence Test ===\n\n";
 
     // ---------------- parameters ----------------
-    const int N = 5000;
+    const int N = 500;
     const double step = 25.0;
     const double prob = 0.05;
     const double radius = 50.0;
@@ -153,7 +153,7 @@ int main() {
 
     // ---------------- hierarchy test params (only for testing) ----------------
     const int k_group = 10;          // order grouping: group size
-    const int super_iters = 5;     // run a few iters on super graph
+    const int super_iters = 2;     // run a few iters on super graph
     const double super_eta_damping = 0.0;
 
     std::cout << "Parameters:\n";
@@ -457,6 +457,8 @@ int main() {
 
     // ---- (A) base: ensure it has run at least once ----
     std::cout << "  [Init] base: one synchronousIteration() before building super1...\n";
+    gbp::FactorGraph base_new = slam::buildNoisyPoseGraph(graph.nodes, graph.edges, config);
+    base_ptr = std::make_shared<gbp::FactorGraph>(std::move(base_new));
     base_ptr->eta_damping = 0.0;
     base_ptr->synchronousIteration(false);
 
@@ -495,13 +497,35 @@ int main() {
     auto abs2 = H.buildAbsFromSuper(super2->graph, /*r_reduced=*/2, /*eta_damping=*/0.0);
     H.bottomUpUpdateAbs(super2->graph, abs2, /*r_reduced=*/2, /*eta_damping=*/0.0);
 
-    // ---- (I) pack 5 layers for vLoop ----
+    // ---- (I) abs2: ensure it has run at least once ----
+    std::cout << "  [Init] abs2: one synchronousIteration() before building super3...\n";
+    abs2->graph->eta_damping = 0.0;
+    abs2->graph->synchronousIteration(false);
+
+    // ---- (J) build super3 from abs2 (treating abs2 as base for next level) ----
+    //std::cout << "  [Init] build super3 from abs2...\n";
+    //auto super3 = H.buildSuperFromBase(abs2->graph, /*eta_damping=*/0.0);
+    //H.bottomUpUpdateSuper(abs2->graph, super3);
+
+    // ---- (K) super3: ensure it has run at least once ----
+    //std::cout << "  [Init] super3: one synchronousIteration() before building abs3...\n";
+    //super3->graph->eta_damping = 0.0;
+    //super3->graph->synchronousIteration(false);
+
+    // ---- (L) build abs3 from super3 (outside vLoop) ----
+    //std::cout << "  [Init] build abs3 from super3...\n";
+    //auto abs3 = H.buildAbsFromSuper(super3->graph, /*r_reduced=*/2, /*eta_damping=*/0.0);
+    //H.bottomUpUpdateAbs(super3->graph, abs3, /*r_reduced=*/2, /*eta_damping=*/0.0);
+
+    // ---- pack 5 layers for vLoop ----
     std::vector<gbp::HierarchyGBP::VLayerEntry> vLayers;
     vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"base",   base_ptr,       nullptr, nullptr});
     vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"super1", super1->graph,  super1,  nullptr});
     vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"abs1",   abs1->graph,    nullptr, abs1});
     vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"super2", super2->graph,  super2,  nullptr});
     vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"abs2",   abs2->graph,    nullptr, abs2});
+    //vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"super3", super3->graph,  super3,  nullptr});
+    //vLayers.push_back(gbp::HierarchyGBP::VLayerEntry{"abs3",   abs3->graph,    nullptr, abs3});
 
     // ---- (F) iterate V-loop with detailed profiling ----
     double energy_prev = 0.0;
@@ -519,9 +543,14 @@ int main() {
     double t_abs1_topDown_iter = 0, t_abs1_topDown = 0;
     double t_super1_topDown_iter = 0, t_super1_topDown = 0;
 
+    const double energy = energyMapFromGraphMu(*vLayers[0].graph);
+    const double gap_to_map = energy - e_opt;
+    std::cout << "  VLoop Iter " << std::setw(3) 
+            << " | Energy = " << std::fixed << std::setprecision(6) << energy
+            << " | gap_to_MAP = " << std::setprecision(6) << gap_to_map;
     for (int it = 0; it < 500; ++it) {
         auto vloop_start = std::chrono::high_resolution_clock::now();
-        H.vLoop(vLayers, 2, 0.0);
+        H.vLoop(vLayers, 2, 0.4);
         /*
         // ========== BOTTOM-UP ========== //
         auto t0 = std::chrono::high_resolution_clock::now();

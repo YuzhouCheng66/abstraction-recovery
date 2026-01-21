@@ -1111,6 +1111,7 @@ void HierarchyGBP::vLoop(
         // After build/update, one iteration per layer ONLY for abs
         if (layers[i].graph && startsWith(name, "abs")) {
             layers[i].graph->synchronousIteration(false);
+            //layers[i].graph->residualIterationVarHeap(static_cast<int>(layers[i].graph->var_nodes.size()));
         }
     }
 
@@ -1127,6 +1128,7 @@ void HierarchyGBP::vLoop(
         // extra iteration ONLY for abs layer (before projection)
         if (layers[ii].graph && startsWith(name, "abs")) {
             layers[ii].graph->synchronousIteration(false);
+            //layers[ii].graph->residualIterationVarHeap(static_cast<int>(layers[ii].graph->var_nodes.size()));
         }
 
         if (startsWith(name, "super")) {
@@ -1147,6 +1149,7 @@ void HierarchyGBP::vLoop(
     // layers[0]["graph"].synchronous_iteration()
     // ---------------------------
     layers[0].graph->synchronousIteration(false);
+    //layers[0].graph->residualIterationVarHeap(static_cast<int>(layers[0].graph->var_nodes.size()));
 }
 
 

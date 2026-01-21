@@ -130,6 +130,35 @@ void FactorGraph::synchronousIteration(bool /*robustify*/) {
 
 }
 
+void FactorGraph::relinearizeAllFactors() {
+    // Explicit Gauss-Newton style re-linearization.
+    // For each factor, build the linearization point by concatenating the
+    // current means (mu) of its adjacent variables, then recompute the factor.
+    for (auto& fup : factors) {
+        Factor* f = fup.get();
+        if (!f || !f->active) continue;
+
+        int total = 0;
+        for (auto* vn : f->adj_var_nodes) {
+            if (!vn) continue;
+            total += vn->dofs;
+        }
+        if (total <= 0) continue;
+
+        Eigen::VectorXd linpoint(total);
+        int off = 0;
+        for (auto* vn : f->adj_var_nodes) {
+            if (!vn) continue;
+            linpoint.segment(off, vn->dofs) = vn->mu;
+            off += vn->dofs;
+        }
+
+        // update_self=true: refresh cached quadratic + reset outgoing messages
+        // (matches how you use computeFactor elsewhere).
+        f->computeFactor(linpoint, true);
+    }
+}
+
 void FactorGraph::residualIterationVarHeap(int max_updates) {
     constexpr double eps = 1e-12;
     std::atomic<int> n_updates{0};

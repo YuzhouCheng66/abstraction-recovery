@@ -100,6 +100,14 @@ public:
     // synchronous iteration (like Python synchronous_iteration)
     void synchronousIteration(bool robustify=false);
 
+    // ------------------------------------------------------------
+    // Nonlinear support (Gauss-Newton style)
+    // ------------------------------------------------------------
+    // Re-linearize all factors at the current variable means (mu).
+    // This updates each factor's internal information form (eta/lam) and
+    // resets its messages accordingly via Factor::computeFactor(..., true).
+    void relinearizeAllFactors();
+
     // residual iteration (variable heap) (like residual_iteration_var_heap)
     void residualIterationVarHeap(int max_updates = -1);
 

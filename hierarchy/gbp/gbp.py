@@ -482,9 +482,7 @@ class VariableNode:
 
         # Node variables are position of landmark in world frame. Initialize variable nodes at origin
         self.mu = np.zeros(dofs)
-        self.Sigma = np.zeros([dofs, dofs])
         self.belief = NdimGaussian(dofs)
-
         self.prior = NdimGaussian(dofs)
         self.dofs = dofs
 
@@ -507,13 +505,12 @@ class VariableNode:
         self.belief.lam = lam
 
         # try-except 注释，仅保留原 try 内容
-        c, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
-        self.Sigma = scipy.linalg.cho_solve((c, lower), np.eye(lam.shape[0]))  # 解 Lam Sigma = I
-        self.mu = self.Sigma @ eta
-        # except np.linalg.LinAlgError:
-        #     # fallback: 用伪逆
-        #     self.Sigma = np.linalg.pinv(lam)
-        #     self.mu = self.Sigma @ eta
+        try:
+            c, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
+            self.mu = scipy.linalg.cho_solve((c, lower), eta)
+        except np.linalg.LinAlgError:
+        #     # fallback: 用求解线性方程组代替
+            self.mu = np.linalg.solve(lam, eta)
 
         # Send belief to adjacent factors
         for factor in self.adj_factors:
@@ -749,11 +746,12 @@ class Factor:
             # concat RHS
             rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
             # try-except 注释，仅保留原 try 内容
-            L = np.linalg.cholesky(lnono)
-            X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
-            # except np.linalg.LinAlgError:
+            try:
+                L = np.linalg.cholesky(lnono)
+                X = scipy.linalg.cho_solve((L, True), rhs_j)    # True: L is lower diagonal
+            except np.linalg.LinAlgError:
             #     # fallback: 用伪逆
-            #     X = np.linalg.pinv(lnono) @ rhs_j
+                X = np.linalg.solve(lnono, rhs_j)
             X_lam = X[:, :lnoo.shape[1]]
             X_eta = X[:, -1]
 
