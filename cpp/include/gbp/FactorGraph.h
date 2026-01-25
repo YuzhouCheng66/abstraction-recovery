@@ -99,6 +99,7 @@ public:
 
     // synchronous iteration (like Python synchronous_iteration)
     void synchronousIteration(bool robustify=false);
+    void synchronousIterationFixedLam(bool robustify=false);
 
     // ------------------------------------------------------------
     // Nonlinear support (Gauss-Newton style)

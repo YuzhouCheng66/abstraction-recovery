@@ -142,7 +142,7 @@ int main() {
     std::cout << "=== Large-Scale SLAM Graph Convergence Test ===\n\n";
 
     // ---------------- parameters ----------------
-    const int N = 500;
+    const int N = 5000;
     const double step = 25.0;
     const double prob = 0.05;
     const double radius = 50.0;
@@ -268,7 +268,11 @@ int main() {
     for (int it = 0; it < max_iters; ++it) {
         auto sync_start = std::chrono::high_resolution_clock::now();
         //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
+        if (it > 1000 && it % 2 == 0) {
+            gbp_graph.synchronousIterationFixedLam();
+        } else {
         gbp_graph.synchronousIteration();
+        }
         //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
         auto sync_end = std::chrono::high_resolution_clock::now();
         sync_total += (sync_end - sync_start);

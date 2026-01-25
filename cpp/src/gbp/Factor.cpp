@@ -264,9 +264,6 @@ void Factor::computeFactor(const Eigen::VectorXd& linpoint_in, bool update_self)
 
 void Factor::computeMessages(double eta_damping) {
 
-
-
-
     if (!active) return;
 
     // Unary: trivial
@@ -294,135 +291,136 @@ void Factor::computeMessages(double eta_damping) {
     // matrices/vectors to reduce Eigen's dynamic-size overhead.
     // No explicit inverses are used; we still rely on LLT solves.
     if (d0_ == 2 && d1_ == 2 && D_ == 4) {
-        if (d0_ == 2 && d1_ == 2 && D_ == 4) {
-            using Vec2 = Eigen::Matrix<double, 2, 1>;
-            using Vec4 = Eigen::Matrix<double, 4, 1>;
-            using Mat2 = Eigen::Matrix<double, 2, 2>;
-            using Mat4 = Eigen::Matrix<double, 4, 4>;
+        using Vec2 = Eigen::Matrix<double, 2, 1>;
+        using Vec4 = Eigen::Matrix<double, 4, 1>;
+        using Mat2 = Eigen::Matrix<double, 2, 2>;
+        using Mat4 = Eigen::Matrix<double, 4, 4>;
 
-            // Map factor blocks (assumes column-major Eigen default, contiguous storage).
-            const auto& eta_dyn = factor.eta();
-            const auto& lam_dyn = factor.lam();
-            assert(eta_dyn.size() == 4);
-            assert(lam_dyn.rows() == 4 && lam_dyn.cols() == 4);
+        // Map factor blocks (assumes column-major Eigen default, contiguous storage).
+        const auto& eta_dyn = factor.eta();
+        const auto& lam_dyn = factor.lam();
+        assert(eta_dyn.size() == 4);
+        assert(lam_dyn.rows() == 4 && lam_dyn.cols() == 4);
 
-            const Eigen::Map<const Vec4> eta_f0(eta_dyn.data());
-            const Eigen::Map<const Mat4> lam_f0(lam_dyn.data());
+        const Eigen::Map<const Vec4> eta_f0(eta_dyn.data());
+        const Eigen::Map<const Mat4> lam_f0(lam_dyn.data());
 
-            // Old messages (maps)
-            const Eigen::Map<const Vec2> old0_eta(old_eta0.data());
-            const Eigen::Map<const Vec2> old1_eta(old_eta1.data());
-            const Eigen::Map<const Mat2> old0_lam(old_lam0.data());
-            const Eigen::Map<const Mat2> old1_lam(old_lam1.data());
+        // Old messages (maps)
+        const Eigen::Map<const Vec2> old0_eta(old_eta0.data());
+        const Eigen::Map<const Vec2> old1_eta(old_eta1.data());
+        const Eigen::Map<const Mat2> old0_lam(old_lam0.data());
+        const Eigen::Map<const Mat2> old1_lam(old_lam1.data());
 
-            // Beliefs (maps)
-            const auto& b0 = adj_var_nodes[0]->belief;
-            const auto& b1 = adj_var_nodes[1]->belief;
-            const Eigen::Map<const Vec2> b0_eta(b0.eta().data());
-            const Eigen::Map<const Vec2> b1_eta(b1.eta().data());
-            const Eigen::Map<const Mat2> b0_lam(b0.lam().data());
-            const Eigen::Map<const Mat2> b1_lam(b1.lam().data());
+        // Beliefs (maps)
+        const auto& b0 = adj_var_nodes[0]->belief;
+        const auto& b1 = adj_var_nodes[1]->belief;
+        const Eigen::Map<const Vec2> b0_eta(b0.eta().data());
+        const Eigen::Map<const Vec2> b1_eta(b1.eta().data());
+        const Eigen::Map<const Mat2> b0_lam(b0.lam().data());
+        const Eigen::Map<const Mat2> b1_lam(b1.lam().data());
 
-            // Note: we intentionally fully unroll target=0/1 here to avoid
-            // any target-dependent branches in the hot path (including damping).
+        // Note: we intentionally fully unroll target=0/1 here to avoid
+        // any target-dependent branches in the hot path (including damping).
 
-            const double s = 1.0 - a;  // damping scale
+        const double s = 1.0 - a;  // damping scale
 
-            // =====================
-            // target = 0 (to v0, eliminate v1)
-            // =====================
-            {
-                const Vec2 eo   = eta_f0.template segment<2>(0);
-                const Vec2 eno  = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
+        // =====================
+        // target = 0 (to v0, eliminate v1)
+        // =====================
+        {
+            const Vec2 eo   = eta_f0.template segment<2>(0);
+            const Vec2 eno  = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
 
-                const Mat2 loo   = lam_f0.template block<2, 2>(0, 0);
-                const Mat2 lono  = lam_f0.template block<2, 2>(0, 2);
-                const Mat2 lnoo  = lam_f0.template block<2, 2>(2, 0);
-                Mat2 lnono       = lam_f0.template block<2, 2>(2, 2);
-                lnono.noalias() += (b1_lam - old1_lam);
-                lnono.diagonal().array() += kJitter;
+            const Mat2 loo   = lam_f0.template block<2, 2>(0, 0);
+            const Mat2 lono  = lam_f0.template block<2, 2>(0, 2);
+            const Mat2 lnoo  = lam_f0.template block<2, 2>(2, 0);
+            Mat2 lnono       = lam_f0.template block<2, 2>(2, 2);
+            lnono.noalias() += (b1_lam - old1_lam);
+            lnono.diagonal().array() += kJitter;
 
-                Eigen::LLT<Mat2> llt2;
-                llt2.compute(lnono);
-                if (llt2.info() != Eigen::Success) {
-                    throw std::runtime_error("LLT failed in Factor::computeMessages (2D fast path, target=0)");
-                }
-                // Solve in fixed-size kernels
-                const Mat2 Y = llt2.solve(lnoo);
-                const Vec2 y = llt2.solve(eno);
+            llt0_.compute(lnono);
+            if (llt0_.info() != Eigen::Success) {
+                throw std::runtime_error("LLT failed in Factor::computeMessages (2D fast path, target=0)");
+            }
+            llt_valid0_ = (llt0_.info() == Eigen::Success);
+            const Mat2 Y = llt0_.solve(lnoo);
+            const Vec2 y = llt0_.solve(eno);
 
-                Mat2 outLam2 = loo - lono * Y;
-                Vec2 outEta2 = eo  - lono * y;
+            Mat2 outLam2 = loo - lono * Y;
+            Vec2 outEta2 = eo  - lono * y;
 
-                // Write message[0]
-                utils::NdimGaussian& outMsg = messages_next[0];
-                Eigen::MatrixXd& outLam = outMsg.lamRef();
-                Eigen::VectorXd& outEta = outMsg.etaRef();
-                assert(outLam.rows() == 2 && outLam.cols() == 2);
-                assert(outEta.size() == 2);
+            // Write message[0]
+            utils::NdimGaussian& outMsg = messages_next[0];
+            Eigen::MatrixXd& outLam = outMsg.lamRef();
+            Eigen::VectorXd& outEta = outMsg.etaRef();
+            assert(outLam.rows() == 2 && outLam.cols() == 2);
+            assert(outEta.size() == 2);
 
-                if (a != 0.0) {
-                    outLam2 *= s;
-                    outEta2 *= s;
-                    outLam2.noalias() += a * old0_lam;
-                    outEta2.noalias() += a * old0_eta;
-                }
-
-                outLam = outLam2;
-                outEta = outEta2;
+            if (a != 0.0) {
+                outLam2 *= s;
+                outEta2 *= s;
+                outLam2.noalias() += a * old0_lam;
+                outEta2.noalias() += a * old0_eta;
             }
 
-            // =====================
-            // target = 1 (to v1, eliminate v0)
-            // =====================
-            {
-                const Vec2 eo   = eta_f0.template segment<2>(2);
-                const Vec2 eno  = eta_f0.template segment<2>(0) + (b0_eta - old0_eta);
-
-                const Mat2 loo   = lam_f0.template block<2, 2>(2, 2);
-                const Mat2 lono  = lam_f0.template block<2, 2>(2, 0);
-                const Mat2 lnoo  = lam_f0.template block<2, 2>(0, 2);
-                Mat2 lnono       = lam_f0.template block<2, 2>(0, 0);
-                lnono.noalias() += (b0_lam - old0_lam);
-                lnono.diagonal().array() += kJitter;
-
-                Eigen::LLT<Mat2> llt2;
-                llt2.compute(lnono);
-                if (llt2.info() != Eigen::Success) {
-                    throw std::runtime_error("LLT failed in Factor::computeMessages (2D fast path, target=1)");
-                }
-                const Mat2 Y = llt2.solve(lnoo);
-                const Vec2 y = llt2.solve(eno);
-
-                Mat2 outLam2 = loo - lono * Y;
-                Vec2 outEta2 = eo  - lono * y;
-
-                // Write message[1]
-                utils::NdimGaussian& outMsg = messages_next[1];
-                Eigen::MatrixXd& outLam = outMsg.lamRef();
-                Eigen::VectorXd& outEta = outMsg.etaRef();
-                assert(outLam.rows() == 2 && outLam.cols() == 2);
-                assert(outEta.size() == 2);
-
-                if (a != 0.0) {
-                    outLam2 *= s;
-                    outEta2 *= s;
-                    outLam2.noalias() += a * old1_lam;
-                    outEta2.noalias() += a * old1_eta;
-                }
-
-                outLam = outLam2;
-                outEta = outEta2;
-            }
-
-            // Commit outputs with O(1) swap (NO deep copy)
-            messages.swap(messages_next);
-            return;
+            outLam = outLam2;
+            outEta = outEta2;
         }
+
+        // =====================
+        // target = 1 (to v1, eliminate v0)
+        // =====================
+        {
+            const Vec2 eo   = eta_f0.template segment<2>(2);
+            const Vec2 eno  = eta_f0.template segment<2>(0) + (b0_eta - old0_eta);
+
+            const Mat2 loo   = lam_f0.template block<2, 2>(2, 2);
+            const Mat2 lono  = lam_f0.template block<2, 2>(2, 0);
+            const Mat2 lnoo  = lam_f0.template block<2, 2>(0, 2);
+            Mat2 lnono       = lam_f0.template block<2, 2>(0, 0);
+            lnono.noalias() += (b0_lam - old0_lam);
+            lnono.diagonal().array() += kJitter;
+
+            llt1_.compute(lnono);
+            llt_valid1_ = (llt1_.info() == Eigen::Success);
+            if (llt1_.info() != Eigen::Success) {
+                throw std::runtime_error("LLT failed in Factor::computeMessages (2D fast path, target=1)");
+            }
+            const Mat2 Y = llt1_.solve(lnoo);
+            const Vec2 y = llt1_.solve(eno);
+            Mat2 outLam2 = loo - lono * Y;
+            Vec2 outEta2 = eo  - lono * y;
+
+            // Write message[1]
+            utils::NdimGaussian& outMsg = messages_next[1];
+            Eigen::MatrixXd& outLam = outMsg.lamRef();
+            Eigen::VectorXd& outEta = outMsg.etaRef();
+            assert(outLam.rows() == 2 && outLam.cols() == 2);
+            assert(outEta.size() == 2);
+
+            if (a != 0.0) {
+                outLam2 *= s;
+                outEta2 *= s;
+                outLam2.noalias() += a * old1_lam;
+                outEta2.noalias() += a * old1_eta;
+            }
+
+            outLam = outLam2;
+            outEta = outEta2;
+        }
+
+        // Commit outputs with O(1) swap (NO deep copy)
+        messages.swap(messages_next);
+        return;
     }
 
     // We compute two directed messages: target=0 => to v0 (eliminate v1), target=1 => to v1 (eliminate v0)
     for (int target = 0; target < 2; ++target) {
+        Eigen::LLT<Eigen::Matrix2d>& llt_ =
+            (target == 0) ? llt0_ : llt1_;
+        bool& llt_valid_ =
+            (target == 0) ? llt_valid0_ : llt_valid1_;
+            
         // ------------------------------------------------------------
         // 1) eta_f_, lam_f_ = factor + belief_correction (no resize)
         // ------------------------------------------------------------
@@ -470,6 +468,7 @@ void Factor::computeMessages(double eta_damping) {
         if (llt_.info() != Eigen::Success) {
             throw std::runtime_error("LLT failed in Factor::computeMessages");
         }
+        llt_valid_ = (llt_.info() == Eigen::Success);
         auto Y = Y_.topLeftCorner(d_no, d_o);
         Y.noalias() = llt_.solve(lnoo_view);
         auto y = y_.head(d_no);
@@ -504,6 +503,187 @@ void Factor::computeMessages(double eta_damping) {
                 outLam.noalias() += a * old_lam1;
                 outEta.noalias() += a * old_eta1;
             }
+        }
+    }
+
+    // Commit outputs with O(1) swap (NO deep copy)  [C]
+    messages.swap(messages_next);
+}
+
+
+
+void Factor::computeMessagesFixedLam(double eta_damping) {
+
+    // 1) If fixed-lam cache is not ready, do a ONE-TIME full lam update
+        //    (same math as computeMessages 2D fast path), and mark cache valid.
+    if (!fixed_lam_valid_) {
+        computeMessages(eta_damping); // no damping on first full update
+        }
+
+    if (!active) return;
+
+    // Unary: trivial
+    if (is_unary_) {
+        auto& outMsg = messages_next[0];
+        outMsg.etaRef().noalias() = factor.eta();
+        outMsg.lamRef().noalias() = factor.lam();
+        messages.swap(messages_next);
+        return;
+    }
+
+    // Binary: dimensions are fixed (d0_, d1_, D_)
+    // NOTE: "fixed-lam" is implemented only for the hot 2D-2D between-factor.
+    //       For other sizes we fall back to the normal computeMessages path.
+    const Eigen::VectorXd& old_eta0 = messages[0].eta();
+    const Eigen::MatrixXd& old_lam0 = messages[0].lam();
+    const Eigen::VectorXd& old_eta1 = messages[1].eta();
+    const Eigen::MatrixXd& old_lam1 = messages[1].lam();
+
+    const double a = eta_damping;
+
+    // ------------------------------------------------------------
+    // Fixed-lam fast path: 2D-2D binary factor
+    //   - Only recompute the LLT (and message.lam) ONCE when cache is invalid.
+    //   - In subsequent calls: keep message.lam unchanged, update only message.eta.
+    // ------------------------------------------------------------
+    if (d0_ == 2 && d1_ == 2 && D_ == 4) {
+        using Vec2 = Eigen::Matrix<double, 2, 1>;
+        using Vec4 = Eigen::Matrix<double, 4, 1>;
+        using Mat2 = Eigen::Matrix<double, 2, 2>;
+        using Mat4 = Eigen::Matrix<double, 4, 4>;
+
+        const auto& eta_dyn = factor.eta();
+        const auto& lam_dyn = factor.lam();
+        assert(eta_dyn.size() == 4);
+        assert(lam_dyn.rows() == 4 && lam_dyn.cols() == 4);
+
+        const Eigen::Map<const Vec4> eta_f0(eta_dyn.data());
+        const Eigen::Map<const Mat4> lam_f0(lam_dyn.data());
+
+        // Old messages (maps)
+        const Eigen::Map<const Vec2> old0_eta(old_eta0.data());
+        const Eigen::Map<const Vec2> old1_eta(old_eta1.data());
+        const Eigen::Map<const Mat2> old0_lam(old_lam0.data());
+        const Eigen::Map<const Mat2> old1_lam(old_lam1.data());
+
+        // Beliefs (maps)
+        const auto& b0 = adj_var_nodes[0]->belief;
+        const auto& b1 = adj_var_nodes[1]->belief;
+        const Eigen::Map<const Vec2> b0_eta(b0.eta().data());
+        const Eigen::Map<const Vec2> b1_eta(b1.eta().data());
+        const Eigen::Map<const Mat2> b0_lam(b0.lam().data());
+        const Eigen::Map<const Mat2> b1_lam(b1.lam().data());
+
+    
+        // 2) Cache is valid: keep lam fixed (copy old lam), update eta only.
+        // ---------------------
+        // target = 0 (to v0)
+        // ---------------------
+        {
+            const Vec2 eo  = eta_f0.template segment<2>(0);
+            const Vec2 eno = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
+            const Mat2 lono = lam_f0.template block<2, 2>(0, 2);
+
+            const Vec2 y = llt0_.solve(eno);
+            Vec2 outEta2 = eo - lono * y;
+
+            if (a != 0.0) {
+                outEta2 *= (1.0 - a);
+                outEta2.noalias() += a * old0_eta;
+            }
+
+            utils::NdimGaussian& outMsg = messages_next[0];
+            outMsg.lamRef().noalias() = old_lam0;  // fixed
+            outMsg.etaRef() = outEta2;
+        }
+
+        // ---------------------
+        // target = 1 (to v1)
+        // ---------------------
+        {
+            const Vec2 eo  = eta_f0.template segment<2>(2);
+            const Vec2 eno = eta_f0.template segment<2>(0) + (b0_eta - old0_eta);
+            const Mat2 lono = lam_f0.template block<2, 2>(2, 0);
+
+            const Vec2 y = llt1_.solve(eno);
+            Vec2 outEta2 = eo - lono * y;
+
+            if (a != 0.0) {
+                outEta2 *= (1.0 - a);
+                outEta2.noalias() += a * old1_eta;
+            }
+
+            utils::NdimGaussian& outMsg = messages_next[1];
+            outMsg.lamRef().noalias() = old_lam1;  // fixed
+            outMsg.etaRef() = outEta2;
+        }
+
+        messages.swap(messages_next);
+        return;
+    }
+
+    // We compute two directed messages: target=0 => to v0 (eliminate v1), target=1 => to v1 (eliminate v0)
+    for (int target = 0; target < 2; ++target) {
+
+        Eigen::LLT<Eigen::Matrix2d>& llt_ =
+            (target == 0) ? llt0_ : llt1_;
+
+        // ------------------------------------------------------------
+        // 1) eta_f_ ONLY (no lam_f_)
+        // ------------------------------------------------------------
+        eta_f_.noalias() = factor.eta();
+
+        if (target == 0) {
+            const auto& b1 = adj_var_nodes[1]->belief;
+            eta_f_.segment(d0_, d1_).noalias() += (b1.eta() - old_eta1);
+        } else {
+            const auto& b0 = adj_var_nodes[0]->belief;
+            eta_f_.segment(0, d0_).noalias() += (b0.eta() - old_eta0);
+        }
+
+        // ------------------------------------------------------------
+        // 2) Views
+        // ------------------------------------------------------------
+        const int d_o  = (target == 0) ? d0_ : d1_;
+        const int d_no = (target == 0) ? d1_ : d0_;
+
+        auto eo  = (target == 0) ? eta_f_.segment(0,   d0_) : eta_f_.segment(d0_, d1_);
+        auto eno = (target == 0) ? eta_f_.segment(d0_, d1_) : eta_f_.segment(0,   d0_);
+
+        // lono is fixed (from factor.lam)
+        auto lono_view = (target == 0) ? factor.lam().block(0,   d0_, d0_, d1_) : factor.lam().block(d0_, 0,   d1_, d0_);
+
+        // ------------------------------------------------------------
+        // 3) Solve ONLY y = lnono^{-1} * eno
+        // ------------------------------------------------------------
+        auto y = y_.head(d_no);
+        y.noalias() = llt_.solve(eno);
+
+        // ------------------------------------------------------------
+        // 4) outEta update, outLam fixed
+        // ------------------------------------------------------------
+        utils::NdimGaussian& outMsg = messages_next[target];
+        Eigen::VectorXd& outEta = outMsg.etaRef();
+        Eigen::MatrixXd& outLam = outMsg.lamRef();
+
+        outEta.noalias() = eo;
+        outEta.noalias() -= lono_view * y;
+
+        // fixed lam
+        if (target == 0) outLam = old_lam0;
+        else             outLam = old_lam1;
+
+        // ------------------------------------------------------------
+        // 5) damping on ETA ONLY
+        // ------------------------------------------------------------
+        if (a != 0.0) {
+            const double s = 1.0 - a;
+            outEta *= s;
+
+            if (target == 0)
+                outEta.noalias() += a * old_eta0;
+            else
+                outEta.noalias() += a * old_eta1;
         }
     }
 

@@ -42,6 +42,7 @@ public:
     Eigen::VectorXd linpoint;
 
     double eta_damping_local = 0.0;
+    bool fixed_lam_valid_ = false;
 
     Factor(
         int id,
@@ -56,6 +57,7 @@ public:
     // Jacobian/Lambda cache control (use when structure changes)
     void invalidateJacobianCache();
     void computeMessages(double eta_damping);
+    void computeMessagesFixedLam(double eta_damping);
 
 private:
     static constexpr double kJitter = 1e-12;
@@ -113,6 +115,16 @@ private:
     std::vector<Eigen::MatrixXd> J_cache_;   // blocks Ji (m x D)
     std::vector<Eigen::MatrixXd> JO_cache_;  // blocks (Ji^T * Oi) (D x m)
     Eigen::MatrixXd lambda_cache_;           // sum_i (Ji^T * Oi * Ji) (D x D)
+
+
+    // =====================
+    // Fixed-lambda cache
+    // =====================
+
+    mutable Eigen::LLT<Eigen::Matrix2d> llt0_;  // target=0 消元用
+    mutable Eigen::LLT<Eigen::Matrix2d> llt1_;  // target=1 消元用
+    bool llt_valid0_ = false;
+    bool llt_valid1_ = false;
 
 private:
     void initWorkspace_();
