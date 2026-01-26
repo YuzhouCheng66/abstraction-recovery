@@ -15,6 +15,7 @@
 #include "gbp/FactorGraph.h"
 #include "gbp/HierarchyGBP.h"       // NEW: for SuperLayer + HierarchyGBP
 #include "gbp/Factor.h"             // for printComputeFactorProfile
+#include "gbp/VariableNode.h"        // for reset/printUpdateBeliefProfile
 
 // ---- proxy energy: 0.5 * sum ||mu_i - GT_i||^2 ----
 static double energyMapFromGraphMu(const gbp::FactorGraph& graph) {
@@ -264,11 +265,24 @@ int main() {
     std::chrono::duration<double> sync_total(0);
     int sync_iters = 0;
 
+    // Optional: split profiling for FactorGraph::synchronousIterationFixedLam
     gbp_graph.synchronousIteration();   // warm-up
+
+    // Reset profiling counters AFTER warm-up (so ratios reflect steady-state)
+    gbp::resetSyncFixedLamProfile();
+    resetComputeMessagesFixedLamProfile();
+    gbp::resetUpdateBeliefProfile();
     for (int it = 0; it < max_iters; ++it) {
+        // Reset again at the transition into FixedLam phase (it==101) to profile FixedLam only
+        if (it == 101) {
+            gbp::resetSyncFixedLamProfile();
+            resetComputeMessagesFixedLamProfile();
+            gbp::resetUpdateBeliefProfile();
+        }
+
         auto sync_start = std::chrono::high_resolution_clock::now();
         //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
-        if (it > 1000 && it % 2 == 0) {
+        if (it > 100) {
             gbp_graph.synchronousIterationFixedLam();
         } else {
         gbp_graph.synchronousIteration();
@@ -303,6 +317,11 @@ int main() {
 
         e_prev = e;
     }
+
+    // Print split timing for the FixedLam phase (if used).
+    gbp::printSyncFixedLamProfile();
+    printComputeMessagesFixedLamProfile();
+    gbp::printUpdateBeliefProfile();
 
     t1 = std::chrono::high_resolution_clock::now();
     ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();

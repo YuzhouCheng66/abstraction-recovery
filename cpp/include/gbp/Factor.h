@@ -14,6 +14,10 @@
 void printComputeFactorProfile();
 void resetComputeFactorProfile();
 
+// Profiling utilities for computeMessagesFixedLam (synchronous fixed-lam iteration)
+void printComputeMessagesFixedLamProfile();
+void resetComputeMessagesFixedLamProfile();
+
 //
 
 namespace gbp {

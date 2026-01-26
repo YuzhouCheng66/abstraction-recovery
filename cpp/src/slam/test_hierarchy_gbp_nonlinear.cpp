@@ -145,9 +145,10 @@ static int runStep2SyncGBP(unsigned int seed, bool use_seed, int m, int k) {
 
     if (fg.nonlinear_factors) fg.relinearizeAllFactors();
 
+
     for (int outer = 0; outer < m; ++outer) {
         for (int inner = 0; inner < k; ++inner) {
-            fg.synchronousIteration(false);
+            fg.synchronousIteration();
         }
         if (fg.nonlinear_factors) fg.relinearizeAllFactors();
 
@@ -264,7 +265,7 @@ static bool parseDouble(const char* s, double& out) {
 int main(int argc, char** argv) {
     int step = 2;
     int m = 100;
-    int k = 200;
+    int k = 20;
     int group = 5;
     int r_reduced = 3;
     double damp = 0.4;

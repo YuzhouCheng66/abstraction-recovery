@@ -8,6 +8,10 @@
 
 namespace gbp {
 
+// Profiling utilities for VariableNode::updateBelief
+void printUpdateBeliefProfile();
+void resetUpdateBeliefProfile();
+
 class Factor;  // forward declaration
 
 struct AdjFactorRef {
