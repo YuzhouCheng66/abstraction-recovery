@@ -47,7 +47,7 @@ static double objectiveSE2(const gbp::FactorGraph& fg) {
         Eigen::VectorXd x(D);
         int off = 0;
         for (auto* vn : f->adj_var_nodes) {
-            x.segment(off, vn->dofs) = vn->belief.mu();
+            x.segment(off, vn->dofs) = vn->mu;
             off += vn->dofs;
         }
 
@@ -60,6 +60,22 @@ static double objectiveSE2(const gbp::FactorGraph& fg) {
         }
     }
     return total;
+}
+
+static void setMuFromStackedVector(gbp::FactorGraph& fg, const Eigen::VectorXd& mu_stack) {
+    // The stacked vector uses the same variable ordering as jointDistributionInfSparse():
+    // increasing variableID and concatenating their dofs.
+    int offset = 0;
+    for (auto& vptr : fg.var_nodes) {
+        if (!vptr) continue;
+        auto& v = *vptr;
+        const int d = v.dofs;
+        if (offset + d > mu_stack.size()) {
+            throw std::runtime_error("setMuFromStackedVector: mu_stack too small");
+        }
+        v.mu = mu_stack.segment(offset, d);
+        offset += d;
+    }
 }
 
 static gbp::FactorGraph buildBaseSE2(unsigned int seed, bool use_seed) {
@@ -106,6 +122,8 @@ static int runStep1BatchGN(unsigned int seed, bool use_seed, int m, double jitte
 
         // (2) solve the quadratic approximation in one sparse solve
         Eigen::VectorXd mu_stack = fg.jointMAPSparse(jitter);
+        setMuFromStackedVector(fg, mu_stack);
+
         // (3) report objective at updated mu (true nonlinear objective)
         const double E = objectiveSE2(fg);
         std::cout << "outer " << std::setw(3) << outer
@@ -129,16 +147,9 @@ static int runStep2SyncGBP(unsigned int seed, bool use_seed, int m, int k) {
 
 
     for (int outer = 0; outer < m; ++outer) {
-        if (outer < 5){
-            for (int inner = 0; inner < k; ++inner) {
-                fg.synchronousIteration();
-            }}
-        else{
-            for (int inner = 0; inner < 20; ++inner) {
-                //fg.synchronousIteration();
-                fg.synchronousIterationFixedLam();
-            }}
-    
+        for (int inner = 0; inner < k; ++inner) {
+            fg.synchronousIteration();
+        }
         if (fg.nonlinear_factors) fg.relinearizeAllFactors();
 
         const int effective_iter = (outer + 1) * k;
@@ -254,7 +265,7 @@ static bool parseDouble(const char* s, double& out) {
 int main(int argc, char** argv) {
     int step = 2;
     int m = 100;
-    int k = 200;
+    int k = 20;
     int group = 5;
     int r_reduced = 3;
     double damp = 0.4;

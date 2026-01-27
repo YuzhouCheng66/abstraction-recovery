@@ -31,8 +31,13 @@ public:
     utils::NdimGaussian prior;
     utils::NdimGaussian belief;
 
+    // Derived moment parameters
+    Eigen::VectorXd mu;
+    Eigen::MatrixXd Sigma;
+
     // Ground truth (for testing/evaluation)
     Eigen::VectorXd GT;
+
     // Adjacency: list of (factor*, local_idx)
     std::vector<AdjFactorRef> adj_factors;
     std::vector<Factor*> adj_factors_raw;  // Direct pointers for SLAM graph building
@@ -43,6 +48,11 @@ public:
     // Main routines
     void updateBelief();          // prior + sum incoming factor->messages[local_idx]
 
+    // Optional performance knob:
+    // - Default: keep same semantics as before (compute Sigma every update).
+    // - If you don't need Sigma downstream, set false to save a full solve.
+    void setComputeSigma(bool on) { compute_sigma_ = on; }
+    bool computeSigmaEnabled() const { return compute_sigma_; }
 
 private:
     static constexpr double kJitter = 1e-12;
@@ -50,7 +60,13 @@ private:
     // ---- scratch/cache (allocated once, reused; dimensions fixed after construction) ----
     Eigen::VectorXd eta_acc_;     // size dofs: accumulator for eta
     Eigen::MatrixXd lam_acc_;     // size dofs x dofs: accumulator for lambda
+
     Eigen::MatrixXd lam_work_;    // size dofs x dofs: lam_acc_ + jitter (factorization input)
+    Eigen::MatrixXd I_;           // cached Identity(dofs,dofs) for Sigma solve
+
+    Eigen::LLT<Eigen::MatrixXd> llt_; // reused LLT object (stores factorization)
+
+    bool compute_sigma_ = true;   // see setComputeSigma()
 
 private:
     // Ensure caches are initialized to current dofs (safe-guard).
@@ -62,7 +78,10 @@ private:
         eta_acc_.setZero(dofs);
         lam_acc_.setZero(dofs, dofs);
         lam_work_.setZero(dofs, dofs);
+        I_.setIdentity(dofs, dofs);
 
+        mu.setZero(dofs);
+        Sigma.setZero(dofs, dofs);
     }
 };
 

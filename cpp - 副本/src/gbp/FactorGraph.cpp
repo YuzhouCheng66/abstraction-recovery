@@ -230,7 +230,7 @@ void FactorGraph::relinearizeAllFactors() {
         int off = 0;
         for (auto* vn : f->adj_var_nodes) {
             if (!vn) continue;
-            linpoint.segment(off, vn->dofs) = vn->belief.mu();
+            linpoint.segment(off, vn->dofs) = vn->mu;
             off += vn->dofs;
         }
 

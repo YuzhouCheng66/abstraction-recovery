@@ -23,15 +23,13 @@ static double energyMapFromGraphMu(const gbp::FactorGraph& graph) {
 
     for (const auto& vptr : graph.var_nodes) {
         if (!vptr) continue;
-        auto& v = *vptr;
+        const auto& v = *vptr;
         if (v.dofs < 2) continue;
 
-
         Eigen::Vector2d gt = v.GT.head(2);
-        Eigen::Vector2d mu = v.belief.mu().head(2);
+        Eigen::Vector2d mu = v.mu.head(2);
         Eigen::Vector2d r  = mu - gt;
         total += 0.5 * r.dot(r);
-
     }
 
     return total;
@@ -107,7 +105,11 @@ static Eigen::VectorXd scatterSuperMuToBase2D(
         }
 
         const int off = it->second.first;
-        mu2.segment(2 * bid, 2) = sv.belief.mu().segment(off, 2);
+        if (off + 2 > sv.mu.size()) {
+            throw std::runtime_error("scatterSuperMuToBase2D: super.mu too small for slice");
+        }
+
+        mu2.segment(2 * bid, 2) = sv.mu.segment(off, 2);
     }
 
     return mu2;
@@ -215,6 +217,18 @@ int main() {
 
         v.belief = v.prior;
 
+        // Optional: initialize mu from prior (debug only)
+        Eigen::MatrixXd lam = v.prior.lam();
+        if (lam.size() > 0) {
+            lam.diagonal().array() += 1e-12;
+            Eigen::LLT<Eigen::MatrixXd> llt(lam);
+            if (llt.info() == Eigen::Success) v.mu = llt.solve(v.prior.eta());
+            else v.mu.setZero();
+        } else {
+            v.mu.setZero();
+        }
+    }
+
     std::cout << "  ✓ Initialized\n\n";
 
     // ---------------- Step 3.5: Batch MAP baseline (sparse) ----------------
@@ -236,14 +250,12 @@ int main() {
     std::cout << "Step 4: Running GBP iterations with eta_damping = " << gbp_graph.eta_damping << "...\n";
     std::cout << "  Target: Convergence (energy change < 1e-2 for 2 consecutive iterations)\n\n";
 
+    double e_prev = energyMapFromGraphMu(gbp_graph);
 
-    Eigen::VectorXd mu_stacked = Eigen::VectorXd::Zero(N*2);
-    int off = 0;
-    for (const auto& vptr : gbp_graph.var_nodes) {
-        mu_stacked.segment(off, v.dofs) = v.prior.mu();
-        off += v.dofs;
-    }
-    double e_prev = energyMapFromStackedMu(gbp_graph, mu_stacked, J.var_ix);
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "Initial GBP proxy energy: " << e_prev
+              << " | gap to batch-MAP: " << (e_prev - e_opt) << "\n\n";
+
     int counter = 0;
     const int max_iters = 2000;
     const double thr = 1e-2;
@@ -405,7 +417,7 @@ int main() {
         const auto& v = *base_ptr->var_nodes[i];
 
         Eigen::Vector2d gt = v.GT.head(2);
-        Eigen::Vector2d mu = v.belief.mu().head(2);
+        Eigen::Vector2d mu = v.mu.head(2);
         Eigen::Vector2d err = mu - gt;
 
         std::cout << "  Node " << std::setw(4) << i
@@ -438,11 +450,11 @@ int main() {
 
         for (int bid : super_test->groups[sid]) {
             const auto& bv = *base_ptr->var_nodes[bid];
-            ref.segment(off, bv.dofs) = bv.belief.mu();
+            ref.segment(off, bv.dofs) = bv.mu;
             off += bv.dofs;
         }
 
-        double err2 = (sv.belief.mu() - ref).norm();
+        double err2 = (sv.mu - ref).norm();
 
         if (sid < 5) {
             std::cout << "Super " << sid
@@ -559,7 +571,7 @@ int main() {
     std::cout << "  VLoop Iter " << std::setw(3) 
             << " | Energy = " << std::fixed << std::setprecision(6) << energy
             << " | gap_to_MAP = " << std::setprecision(6) << gap_to_map;
-    for (int it = 0; it < 2; ++it) {
+    for (int it = 0; it < 500; ++it) {
         auto vloop_start = std::chrono::high_resolution_clock::now();
         H.vLoop(vLayers, 2, 0.4);
         /*
@@ -710,6 +722,5 @@ int main() {
 
     std::cout << "\n=== Test Complete ===\n";
     return 0;
-}
 }
 

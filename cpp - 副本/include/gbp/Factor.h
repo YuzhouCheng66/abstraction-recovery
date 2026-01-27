@@ -33,8 +33,8 @@ public:
     std::vector<int> adj_vIDs;
 
     // Factor-to-variable messages (ping-pong buffers for C optimization)
-    std::vector<utils::NdimGaussian, Eigen::aligned_allocator<utils::NdimGaussian>> messages;
-    std::vector<utils::NdimGaussian, Eigen::aligned_allocator<utils::NdimGaussian>> messages_next;
+    std::vector<utils::NdimGaussian> messages;
+    std::vector<utils::NdimGaussian> messages_next;
 
     std::vector<Eigen::VectorXd> measurement;         // z_i
     std::vector<Eigen::MatrixXd> measurement_lambda;  // Λ_i

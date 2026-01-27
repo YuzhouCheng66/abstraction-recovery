@@ -497,7 +497,10 @@ void Factor::computeMessages(double eta_damping) {
 
     // We compute two directed messages: target=0 => to v0 (eliminate v1), target=1 => to v1 (eliminate v0)
     for (int target = 0; target < 2; ++target) {
-        Eigen::LLT<Eigen::MatrixXd>& llt = this->llt_;
+        Eigen::LLT<Eigen::Matrix2d>& llt_ =
+            (target == 0) ? llt0_ : llt1_;
+        bool& llt_valid_ =
+            (target == 0) ? llt_valid0_ : llt_valid1_;
             
         // ------------------------------------------------------------
         // 1) eta_f_, lam_f_ = factor + belief_correction (no resize)
@@ -546,6 +549,7 @@ void Factor::computeMessages(double eta_damping) {
         if (llt_.info() != Eigen::Success) {
             throw std::runtime_error("LLT failed in Factor::computeMessages");
         }
+        llt_valid_ = (llt_.info() == Eigen::Success);
         auto Y = Y_.topLeftCorner(d_no, d_o);
         Y.noalias() = llt_.solve(lnoo_view);
         auto y = y_.head(d_no);
@@ -606,13 +610,6 @@ void Factor::computeMessagesFixedLam(double eta_damping) {
     if (!fixed_lam_valid_) {
         const auto t0 = Clock::now();
         computeMessages(eta_damping); // one-time full update
-        // Ensure ping-pong buffers share the same fixed lambda after the one-time update.
-        // Otherwise, the first fixed-lam iteration could swap in stale lambdas.
-        if (!messages.empty() && messages_next.size() == messages.size()) {
-            for (size_t k = 0; k < messages.size(); ++k) {
-                messages_next[k].lamRef().noalias() = messages[k].lam();
-            }
-        }
         const auto t1 = Clock::now();
         add_ns(g_cmf_init_fallback_ns, t0, t1);
         g_cmf_init_fallback_calls.fetch_add(1, std::memory_order_relaxed);
@@ -729,8 +726,8 @@ void Factor::computeMessagesFixedLam(double eta_damping) {
             }
 
             utils::NdimGaussian& outMsg = messages_next[0];
-            // Lambda is fixed under fixed-lam iteration; avoid rewriting it every call.
-            Eigen::Map<Vec2>(outMsg.etaRef().data()) = outEta2;
+            outMsg.lamRef().noalias() = old_lam0;  // fixed
+            outMsg.etaRef() = outEta2;
             const auto tp1 = Clock::now();
             add_ns(g_cmf_pack0_ns, tp0, tp1);
         }
@@ -757,8 +754,8 @@ void Factor::computeMessagesFixedLam(double eta_damping) {
             }
 
             utils::NdimGaussian& outMsg = messages_next[1];
-            // Lambda is fixed under fixed-lam iteration; avoid rewriting it every call.
-            Eigen::Map<Vec2>(outMsg.etaRef().data()) = outEta2;
+            outMsg.lamRef().noalias() = old_lam1;  // fixed
+            outMsg.etaRef() = outEta2;
             const auto tp1 = Clock::now();
             add_ns(g_cmf_pack1_ns, tp0, tp1);
         }

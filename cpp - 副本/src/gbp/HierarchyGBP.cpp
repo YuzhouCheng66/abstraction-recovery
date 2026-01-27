@@ -120,8 +120,8 @@ HierarchyGBP::buildSuperFromBase(const std::shared_ptr<FactorGraph>& base, doubl
             const auto& bv = *base->var_nodes[bid];
             const auto [off, d] = layer->local_idx[sid].at(bid);
 
-            mu.segment(off, d) = bv.belief.mu();
-            Sigma.block(off, off, d, d) = bv.belief.Sigma();
+            mu.segment(off, d) = bv.mu;
+            Sigma.block(off, off, d, d) = bv.Sigma;
             sv->GT.segment(off, d) = bv.GT.head(d);
         }
 
@@ -130,6 +130,9 @@ HierarchyGBP::buildSuperFromBase(const std::shared_ptr<FactorGraph>& base, doubl
         // 你的 pipeline 中 VariableNode 默认 compute Sigma，所以这里通常可行。
         Eigen::MatrixXd lam = Sigma.inverse();
         Eigen::VectorXd eta = lam * mu;
+
+        sv->mu = mu;
+        sv->Sigma = Sigma;
 
         sv->belief = utils::NdimGaussian(dofs, eta, lam);
         // prior very weak: 1e-12 * lam/eta (Python)
@@ -420,6 +423,17 @@ void HierarchyGBP::bottomUpUpdateSuper(
         auto& sv = *super->graph->var_nodes[sid];
         const int D = super->total_dofs[sid];
 
+        // ---- ensure sizes only when needed (avoid realloc every iter) ----
+        // moments
+        if (sv.mu.size() != D) {
+            sv.mu.setZero(D);
+        }
+        // Sigma is block-diag; only need to guarantee off-diag stays 0.
+        // So we clear Sigma only when size changes.
+        if (sv.Sigma.rows() != D || sv.Sigma.cols() != D) {
+            sv.Sigma.setZero(D, D);   // one-time clear on resize
+        }
+
         // belief storage
         sv.belief.resizeLikeDim(D);
 
@@ -443,6 +457,9 @@ void HierarchyGBP::bottomUpUpdateSuper(
             eta_ref.segment(off, d) = bv.belief.eta().head(d);
             lam_ref.block(off, off, d, d) = bv.belief.lam().topLeftCorner(d, d);
 
+            // moments blocks
+            sv.mu.segment(off, d) = bv.mu.head(d);
+            sv.Sigma.block(off, off, d, d) = bv.Sigma.topLeftCorner(d, d);
         }
 
         //auto t1 = std::chrono::high_resolution_clock::now();
@@ -467,7 +484,7 @@ void HierarchyGBP::bottomUpUpdateSuper(
         int c0 = 0;
         for (auto* v : f.adj_var_nodes) {
             const int d = v->dofs;
-            lp.segment(c0, d) = v->belief.mu();
+            lp.segment(c0, d) = v->mu;
             c0 += d;
         }
 
@@ -532,15 +549,18 @@ HierarchyGBP::buildAbsFromSuper(
         const int sid = sn.variableID;
         const int r = (sn.dofs <= r_reduced) ? sn.dofs : r_reduced;
 
+        const Eigen::VectorXd mu_sup = sn.mu;
+        const Eigen::MatrixXd Sigma_sup = sn.Sigma;
+
         // eig decomposition + take top-r eigenvectors (descending)
-        Eigen::MatrixXd B_reduced = topEigenvectorsDescending(sn.belief.Sigma(), r);
+        Eigen::MatrixXd B_reduced = topEigenvectorsDescending(Sigma_sup, r);
         abs->Bs[sid] = B_reduced;
 
         // projection
-        Eigen::VectorXd mu_abs = B_reduced.transpose() * sn.belief.mu();
-        Eigen::MatrixXd Sigma_abs = B_reduced.transpose() * sn.belief.Sigma() * B_reduced;
+        Eigen::VectorXd mu_abs = B_reduced.transpose() * mu_sup;
+        Eigen::MatrixXd Sigma_abs = B_reduced.transpose() * Sigma_sup * B_reduced;
 
-        Eigen::VectorXd k = sn.belief.mu() - B_reduced * mu_abs;
+        Eigen::VectorXd k = mu_sup - B_reduced * mu_abs;
         abs->ks[sid] = k;
 
         Eigen::MatrixXd lam_abs = Sigma_abs.inverse();
@@ -549,6 +569,8 @@ HierarchyGBP::buildAbsFromSuper(
         // create variable
         auto* v = abs->graph->addVariable(sid, r);
         v->GT = sn.GT;
+        v->mu = mu_abs;
+        v->Sigma = Sigma_abs;
 
         // belief set (lam first to reset factorization) - match style used elsewhere
         v->belief.setLam(lam_abs);
@@ -600,7 +622,7 @@ HierarchyGBP::buildAbsFromSuper(
             abs->graph->connect(af, v0, 0);
 
             // initial linearization
-            af->computeFactor(v0->belief.mu(), true);
+            af->computeFactor(v0->mu, true);
         } else if (k_adj == 2) {
             // between
             const int i = sup_f->adj_var_nodes[0]->variableID;
@@ -670,8 +692,8 @@ HierarchyGBP::buildAbsFromSuper(
             abs->graph->connect(af, vj, 1);
 
             Eigen::VectorXd lin0(vi->dofs + vj->dofs);
-            lin0.head(vi->dofs) = vi->belief.mu();
-            lin0.tail(vj->dofs) = vj->belief.mu();
+            lin0.head(vi->dofs) = vi->mu;
+            lin0.tail(vj->dofs) = vj->mu;
             af->computeFactor(lin0, true);
         }
         // ignore higher-order factors (Python doesn't have them here)
@@ -711,8 +733,8 @@ void HierarchyGBP::bottomUpUpdateAbs(
         // Fixed projection
         const Eigen::MatrixXd& B = abs->Bs.at(sid);
 
-        const Eigen::VectorXd& mu_sup = sn.belief.mu();
-        const Eigen::MatrixXd& Sigma_sup = sn.belief.Sigma();
+        const Eigen::VectorXd& mu_sup = sn.mu;
+        const Eigen::MatrixXd& Sigma_sup = sn.Sigma;
 
         // ---- thread-local workspaces (avoid repeated allocations) ----
         static thread_local Eigen::VectorXd mu_abs;
@@ -764,8 +786,8 @@ void HierarchyGBP::bottomUpUpdateAbs(
 
         // ---- write back ----
         auto* v = abs->graph->var_nodes[sid].get();
-        v->belief.mu() = mu_abs;
-        v->belief.Sigma() = Sigma_abs;
+        v->mu = mu_abs;
+        v->Sigma = Sigma_abs;
 
         // Avoid setLam/setEta copies
         v->belief.resizeLikeDim(r);
@@ -798,7 +820,7 @@ void HierarchyGBP::bottomUpUpdateAbs(
         int c0 = 0;
         for (auto* v : f.adj_var_nodes) {
             const int d = v->dofs;
-            lp.segment(c0, d) = v->belief.mu();
+            lp.segment(c0, d) = v->mu;
             c0 += d;
         }
 
@@ -845,7 +867,7 @@ void HierarchyGBP::topDownModifyBaseFromSuper(
         const auto& base_ids = super->groups[sid];
         if (base_ids.empty()) continue;
 
-        const Eigen::VectorXd& mu_super = s_var.belief.mu();
+        const Eigen::VectorXd& mu_super = s_var.mu;
 
         int off = 0;
         for (int bid : base_ids) {
@@ -876,14 +898,17 @@ void HierarchyGBP::topDownModifyBaseFromSuper(
             if (d_eta.size() != d) d_eta.resize(d);
 
             // d_mu = mu_child - mu_old
-            d_mu.noalias() = mu_child - v->belief.mu().head(d);
+            d_mu.noalias() = mu_child - v->mu.head(d);
+
+            // Update mu (store new)
+            v->mu.head(d) = mu_child;
 
             // If no change: still sync eta/prior to lam*mu (same as your logic)
             const double dm2 = d_mu.squaredNorm();
             if (dm2 == 0.0) {
                 const Eigen::MatrixXd& lam = v->belief.lam();
                 // eta_now = lam * mu
-                v->belief.etaRef().noalias() = lam * v->belief.mu();
+                v->belief.etaRef().noalias() = lam * v->mu;
 
                 // weak prior: 1e-10 * belief
                 v->prior.resizeLikeDim(d);
@@ -987,19 +1012,19 @@ void HierarchyGBP::topDownModifySuperFromAbs(
         // ---- compute mu_new = B * an->mu + k (no temp) ----
         // Guard against dimension mismatch: use head(d) if needed
         // (Assumes B has at least d rows and k has at least d entries)
-        mu_new.noalias() = B.topRows(d) * an->belief.mu() + k.head(d);
+        mu_new.noalias() = B.topRows(d) * an->mu + k.head(d);
 
         // ---- d_mu = mu_new - mu_old (mu_old is sn->mu) ----
-        d_mu.noalias() = mu_new - sn->belief.mu().head(d);
+        d_mu.noalias() = mu_new - sn->mu.head(d);
 
         // write back mu
-        sn->belief.mu().head(d) = mu_new;
+        sn->mu.head(d) = mu_new;
 
         // If no change: sync eta/prior to lam*mu (same semantics as your code)
         const double dm2 = d_mu.squaredNorm();
         if (dm2 == 0.0) {
             const Eigen::MatrixXd& lam0 = sn->belief.lam();
-            sn->belief.etaRef().noalias() = lam0 * sn->belief.mu();   // full mu (same as before)
+            sn->belief.etaRef().noalias() = lam0 * sn->mu;   // full mu (same as before)
 
             sn->prior.resizeLikeDim(d);
             sn->prior.etaRef().noalias() = 1e-10 * sn->belief.eta();

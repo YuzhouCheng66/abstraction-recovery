@@ -112,10 +112,15 @@ VariableNode::VariableNode(int id_, int dofs_)
       active(true),
       prior(dofs_),
       belief(dofs_),
+      mu(Eigen::VectorXd::Zero(dofs_)),
+      Sigma(Eigen::MatrixXd::Zero(dofs_, dofs_)),
       GT(Eigen::VectorXd::Zero(dofs_)),
       eta_acc_(Eigen::VectorXd::Zero(dofs_)),
       lam_acc_(Eigen::MatrixXd::Zero(dofs_, dofs_)),
-      lam_work_(Eigen::MatrixXd::Zero(dofs_, dofs_))
+      lam_work_(Eigen::MatrixXd::Zero(dofs_, dofs_)),
+      I_(Eigen::MatrixXd::Identity(dofs_, dofs_)),
+      llt_(),
+      compute_sigma_(true)
 {
     // Nothing else
 }
@@ -128,10 +133,15 @@ VariableNode::VariableNode()
       active(true),
       prior(0),
       belief(0),
+      mu(),
+      Sigma(),
       GT(),
       eta_acc_(),
       lam_acc_(),
-      lam_work_()
+      lam_work_(),
+      I_(),
+      llt_(),
+      compute_sigma_(true)
 {
     // Nothing else
 }
@@ -186,6 +196,35 @@ void VariableNode::updateBelief() {
         belief.etaRef().head<2>() = eta2;
         belief.lamRef().topLeftCorner<2, 2>() = lam2;
 
+        // Solve for mu (and optionally Sigma) using fixed-size LLT
+        const auto t_llt0 = Clock::now();
+        Eigen::LLT<Mat2> llt2;
+        llt2.compute(lam2);
+        if (llt2.info() != Eigen::Success) {
+            lam2(0, 0) += kJitter;
+            lam2(1, 1) += kJitter;
+            llt2.compute(lam2);
+            if (llt2.info() != Eigen::Success) {
+                throw std::runtime_error("VariableNode::updateBelief (2D): LLT failed (matrix not SPD?)");
+            }
+        }
+        const auto t_llt1 = Clock::now();
+        add_ns(g_ub_llt2_ns, t_llt0, t_llt1);
+
+        const auto t_mu0 = Clock::now();
+        mu.head<2>().noalias() = llt2.solve(eta2);
+        const auto t_mu1 = Clock::now();
+        add_ns(g_ub_solve2_mu_ns, t_mu0, t_mu1);
+
+        if (compute_sigma_) {
+            const Mat2 I2 = Mat2::Identity();
+            const auto t_s0 = Clock::now();
+            Sigma.topLeftCorner<2, 2>().noalias() = llt2.solve(I2);
+            const auto t_s1 = Clock::now();
+            add_ns(g_ub_solve2_sigma_ns, t_s0, t_s1);
+        }
+        const auto t_all1 = Clock::now();
+        add_ns(g_ub_total2_ns, t_all0, t_all1);
         return;
     }
 
@@ -222,12 +261,49 @@ void VariableNode::updateBelief() {
     const auto t_wr1 = Clock::now();
     add_ns(g_ub_write_ns, t_wr0, t_wr1);
 
+    // -------------------------
+    // Compute mu, Sigma from belief (SPD expected):
+    //   (lam + jitter*I) * mu    = eta
+    //   (lam + jitter*I) * Sigma = I
+    // -------------------------
+    // ---- VB: avoid lam_work_ copy unless LLT fails ----
+    // Try factorization without jitter first (common case: SPD already)
+    const auto t_llt0 = Clock::now();
+    llt_.compute(lam_acc_);
+    if (llt_.info() != Eigen::Success) {
+        lam_work_.noalias() = lam_acc_;
+        lam_work_.diagonal().array() += kJitter;
+        llt_.compute(lam_work_);
+        if (llt_.info() != Eigen::Success) {
+            throw std::runtime_error("VariableNode::updateBelief: LLT failed (matrix not SPD?)");
+        }
+    }
+    const auto t_llt1 = Clock::now();
+    add_ns(g_ub_llt_ns, t_llt0, t_llt1);
+
+
+    // mu = inv(lam)*eta
+    const auto t_mu0 = Clock::now();
+    mu.noalias() = llt_.solve(eta_acc_);
+    const auto t_mu1 = Clock::now();
+    add_ns(g_ub_solve_mu_ns, t_mu0, t_mu1);
+
+    // Sigma = inv(lam)*I (optional)
+    if (compute_sigma_) {
+        const auto t_s0 = Clock::now();
+        Sigma.noalias() = llt_.solve(I_);
+        const auto t_s1 = Clock::now();
+        add_ns(g_ub_solve_sigma_ns, t_s0, t_s1);
+    } else {
+        // In case you toggle compute_sigma_ off for performance experiments.
+        const auto t_s0 = Clock::now();
+        const auto t_s1 = Clock::now();
+        add_ns(g_ub_sigma_skip_ns, t_s0, t_s1);
+    }
 
     const auto t_all1 = Clock::now();
     add_ns(g_ub_total_ns, t_all0, t_all1);
 
 }
-
-
 
 } // namespace gbp

@@ -279,7 +279,11 @@ gbp::FactorGraph buildNoisyPoseGraphSE2(
     for (int i = 0; i < N; ++i) {
         gbp::VariableNode* v = fg.addVariable(i, 3);
         v->GT = nodes[i].GT;
+        v->mu = Eigen::Vector3d::Zero();
+
         v->prior.setLam(Lam_weak);
+        v->prior.setEta(Lam_weak * v->mu);
+
         var_ptrs[i] = v;
     }
 
@@ -399,28 +403,30 @@ gbp::FactorGraph buildNoisyPoseGraphSE2(
     }
 
     // ---------- Sequentially initialize mu (Python policy) ----------
-    Eigen::Vector3d v_mu_estated = Eigen::Vector3d::Zero();
-
     if (N > 0) {
-        var_ptrs[0]->prior.setEta(Lam_weak * var_ptrs[0]->GT.head<3>());
+        var_ptrs[0]->mu = var_ptrs[0]->GT.head<3>();
     }
 
     for (int i = 0; i < N - 1; ++i) {
         auto ito = odom_meas.find({i, i + 1});
         if (ito != odom_meas.end()) {
-            v_mu_estated = composeSE2(v_mu_estated, ito->second);
+            const Eigen::Vector3d mu_i = var_ptrs[i]->mu.head<3>();
+            var_ptrs[i + 1]->mu = composeSE2(mu_i, ito->second);
         } else {
-            v_mu_estated = var_ptrs[i + 1]->GT.head<3>();
+            var_ptrs[i + 1]->mu = var_ptrs[i + 1]->GT.head<3>();
         }
 
         // override if strong prior exists
         auto itp = prior_meas.find(i + 1);
         if (itp != prior_meas.end()) {
-            v_mu_estated = itp->second;
+            var_ptrs[i + 1]->mu = itp->second;
         }
+    }
 
-        auto* v = var_ptrs[i+1];
-        v->prior.setEta(Lam_weak * v_mu_estated);
+    // Update weak prior eta to match initialized mu
+    for (int i = 0; i < N; ++i) {
+        auto* v = var_ptrs[i];
+        v->prior.setEta(Lam_weak * v->mu);
     }
 
     // ---------- Linearize all factors at current mu ----------
@@ -434,7 +440,7 @@ gbp::FactorGraph buildNoisyPoseGraphSE2(
         Eigen::VectorXd linpoint(total);
         int off = 0;
         for (auto* vn : f->adj_var_nodes) {
-            linpoint.segment(off, vn->dofs) = vn->prior.mu();
+            linpoint.segment(off, vn->dofs) = vn->mu;
             off += vn->dofs;
         }
 
