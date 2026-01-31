@@ -7,11 +7,6 @@
 #include "NdimGaussian.h"
 
 namespace gbp {
-
-// Profiling utilities for VariableNode::updateBelief
-void printUpdateBeliefProfile();
-void resetUpdateBeliefProfile();
-
 class Factor;  // forward declaration
 
 struct AdjFactorRef {
@@ -37,6 +32,9 @@ public:
     std::vector<AdjFactorRef> adj_factors;
     std::vector<Factor*> adj_factors_raw;  // Direct pointers for SLAM graph building
 
+    Eigen::Vector2d mu2;
+    Eigen::VectorXd mu;
+    
     explicit VariableNode(int id, int dofs_);
     VariableNode();  // Default constructor
 

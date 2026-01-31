@@ -22,7 +22,6 @@
 #include <vector>
 #include <string>
 #include <cmath>
-#include <chrono>
 #include <memory>
 
 #include "slam/SlamGraph.h"
@@ -48,7 +47,7 @@ static double objectiveSE2(const gbp::FactorGraph& fg) {
         Eigen::VectorXd x(D);
         int off = 0;
         for (auto* vn : f->adj_var_nodes) {
-            x.segment(off, vn->dofs) = vn->mu;
+            x.segment(off, vn->dofs) = vn->belief.mu();
             off += vn->dofs;
         }
 
@@ -61,34 +60,6 @@ static double objectiveSE2(const gbp::FactorGraph& fg) {
         }
     }
     return total;
-}
-
-
-static void setMuFromStackedVector(gbp::FactorGraph& fg, const Eigen::VectorXd& mu_stack) {
-    // The stacked vector uses the same variable ordering as jointDistributionInfSparse():
-    // increasing variableID and concatenating their dofs.
-    int offset = 0;
-    for (auto& vptr : fg.var_nodes) {
-        if (!vptr) continue;
-        auto& v = *vptr;
-        const int d = v.dofs;
-        if (offset + d > mu_stack.size()) {
-            throw std::runtime_error("setMuFromStackedVector: mu_stack too small");
-        }
-        v.mu = mu_stack.segment(offset, d);
-        offset += d;
-    }
-}
-
-static void setMu(gbp::FactorGraph& fg) {
-    // The stacked vector uses the same variable ordering as jointDistributionInfSparse():
-    // increasing variableID and concatenating their dofs.
-    int offset = 0;
-    for (auto& vptr : fg.var_nodes) {
-        if (!vptr) continue;
-        auto& v = *vptr;
-        v.mu = v.belief.mu();
-    }
 }
 
 static gbp::FactorGraph buildBaseSE2(unsigned int seed, bool use_seed) {
@@ -126,14 +97,15 @@ static int runStep1BatchGN(unsigned int seed, bool use_seed, int m, double jitte
               << ", nonlinear_factors=" << (fg.nonlinear_factors ? "true" : "false")
               << "\n";
 
+    // Initial linearization
+    if (fg.nonlinear_factors) fg.relinearizeAllFactors();
+
     for (int outer = 0; outer < m; ++outer) {
         // (1) relinearize at current mu
         if (fg.nonlinear_factors) fg.relinearizeAllFactors();
 
         // (2) solve the quadratic approximation in one sparse solve
         Eigen::VectorXd mu_stack = fg.jointMAPSparse(jitter);
-        setMuFromStackedVector(fg, mu_stack);
-
         // (3) report objective at updated mu (true nonlinear objective)
         const double E = objectiveSE2(fg);
         std::cout << "outer " << std::setw(3) << outer
@@ -153,38 +125,28 @@ static int runStep2SyncGBP(unsigned int seed, bool use_seed, int m, int k) {
               << ", nonlinear_factors=" << (fg.nonlinear_factors ? "true" : "false")
               << "\n";
 
+    if (fg.nonlinear_factors) fg.relinearizeAllFactors();
+
+
     for (int outer = 0; outer < m; ++outer) {
-        if (fg.nonlinear_factors) fg.relinearizeAllFactors();
-
-
-        auto t0 = std::chrono::high_resolution_clock::now();
-        
         if (outer < 5){
             for (int inner = 0; inner < k; ++inner) {
                 fg.synchronousIteration();
-            }
-
-        auto t1 = std::chrono::high_resolution_clock::now();
-        const double solve_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        std::cout << "[Base GBP] iters=" << k << ", " << solve_ms << " ms "<< "\n";
-        }
+            }}
         else{
             for (int inner = 0; inner < 20; ++inner) {
-                fg.synchronousIteration();
-                //fg.synchronousIterationFixedLam();
-            }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        const double solve_ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        std::cout << "[Base GBP] iters=" << 20 << ", " << solve_ms << " ms "<< "\n";
-        }
+                //fg.synchronousIteration();
+                fg.synchronousIterationFixedLam();
+            }}
     
+        if (fg.nonlinear_factors) fg.relinearizeAllFactors();
+
         const int effective_iter = (outer + 1) * k;
         const double E = objectiveSE2(fg);
         std::cout << "outer " << std::setw(3) << outer
+                  << " (iters=" << std::setw(4) << effective_iter << ")"
                   << "   obj=" << std::setprecision(12) << E
                   << "\n";
-
-        setMu(fg);
     }
 
     return 0;

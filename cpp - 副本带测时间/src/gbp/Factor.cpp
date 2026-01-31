@@ -5,7 +5,119 @@
 #include <stdexcept>
 #include <utility>   // std::move
 #include <cstring>   // std::memcpy
+#include <chrono>
+#include <atomic>
+#include <iostream>
 
+// ===== Profiling counters for computeFactor =====
+static std::atomic<long long> g_cf_jac_ns{0};
+static std::atomic<long long> g_cf_meas_ns{0};
+static std::atomic<long long> g_cf_loop_lam_ns{0};
+static std::atomic<long long> g_cf_loop_eta_ns{0};
+static std::atomic<int> g_cf_call_count{0};
+
+// ===== Profiling counters for computeMessagesFixedLam =====
+static std::atomic<long long> g_cmf_total_ns{0};
+static std::atomic<long long> g_cmf_init_fallback_ns{0};
+static std::atomic<long long> g_cmf_generic_fallback_ns{0};
+static std::atomic<long long> g_cmf_unary_ns{0};
+static std::atomic<long long> g_cmf_solve0_ns{0};
+static std::atomic<long long> g_cmf_solve1_ns{0};
+static std::atomic<long long> g_cmf_pack0_ns{0};
+static std::atomic<long long> g_cmf_pack1_ns{0};
+static std::atomic<long long> g_cmf_swap_ns{0};
+static std::atomic<long long> g_cmf_misc_ns{0};
+static std::atomic<int> g_cmf_calls{0};
+static std::atomic<int> g_cmf_init_fallback_calls{0};
+static std::atomic<int> g_cmf_generic_fallback_calls{0};
+static std::atomic<int> g_cmf_unary_calls{0};
+
+void printComputeFactorProfile() {
+    // int calls = g_cf_call_count.load();
+    // if (calls == 0) {
+    //     std::cout << "[computeFactor Profile] No calls recorded.\n";
+    //     return;
+    // }
+    // auto toMs = [](long long ns) { return ns / 1e6; };
+    // std::cout << "\n=== computeFactor Detailed Profile (" << calls << " calls) ===\n";
+    // std::cout << "  jac_fn:        " << toMs(g_cf_jac_ns.load()) << " ms\n";
+    // std::cout << "  meas_fn:       " << toMs(g_cf_meas_ns.load()) << " ms\n";
+    // std::cout << "  loop (lambda): " << toMs(g_cf_loop_lam_ns.load()) << " ms\n";
+    // std::cout << "  loop (eta):    " << toMs(g_cf_loop_eta_ns.load()) << " ms\n";
+    // std::cout << "==============================================\n";
+}
+
+void resetComputeFactorProfile() {
+    g_cf_jac_ns = 0;
+    g_cf_meas_ns = 0;
+    g_cf_loop_lam_ns = 0;
+    g_cf_loop_eta_ns = 0;
+    g_cf_call_count = 0;
+}
+
+void printComputeMessagesFixedLamProfile() {
+    const int calls = g_cmf_calls.load();
+    if (calls == 0) {
+        std::cout << "[computeMessagesFixedLam Profile] No calls recorded.\n";
+        return;
+    }
+    auto toMs = [](long long ns) { return ns / 1e6; };
+
+    const double total_ms = toMs(g_cmf_total_ns.load());
+    std::cout << "[computeMessagesFixedLam Profile] calls=" << calls
+              << " total=" << total_ms << " ms (avg " << (total_ms / calls) << " ms/call)\n";
+
+    const int init_calls = g_cmf_init_fallback_calls.load();
+    const int gen_calls  = g_cmf_generic_fallback_calls.load();
+    const int unary_calls = g_cmf_unary_calls.load();
+
+    if (init_calls > 0) {
+        const double ms = toMs(g_cmf_init_fallback_ns.load());
+        std::cout << "  - init fallback (computeMessages once): " << ms
+                  << " ms (avg " << (ms / init_calls) << " ms/call)\n";
+    }
+    if (gen_calls > 0) {
+        const double ms = toMs(g_cmf_generic_fallback_ns.load());
+        std::cout << "  - generic fallback (non-2D / other):    " << ms
+                  << " ms (avg " << (ms / gen_calls) << " ms/call)\n";
+    }
+    if (unary_calls > 0) {
+        const double ms = toMs(g_cmf_unary_ns.load());
+        std::cout << "  - unary:                                " << ms
+                  << " ms (avg " << (ms / unary_calls) << " ms/call)\n";
+    }
+
+    const double s0 = toMs(g_cmf_solve0_ns.load());
+    const double s1 = toMs(g_cmf_solve1_ns.load());
+    const double p0 = toMs(g_cmf_pack0_ns.load());
+    const double p1 = toMs(g_cmf_pack1_ns.load());
+    const double sw = toMs(g_cmf_swap_ns.load());
+    const double mi = toMs(g_cmf_misc_ns.load());
+
+    std::cout << "  - solve0:                               " << s0 << " ms\n";
+    std::cout << "  - pack0 (eta+damp+write):               " << p0 << " ms\n";
+    std::cout << "  - solve1:                               " << s1 << " ms\n";
+    std::cout << "  - pack1 (eta+damp+write):               " << p1 << " ms\n";
+    std::cout << "  - swap:                                 " << sw << " ms\n";
+    std::cout << "  - misc (branching/guards/maps):          " << mi << " ms\n";
+}
+
+void resetComputeMessagesFixedLamProfile() {
+    g_cmf_total_ns = 0;
+    g_cmf_init_fallback_ns = 0;
+    g_cmf_generic_fallback_ns = 0;
+    g_cmf_unary_ns = 0;
+    g_cmf_solve0_ns = 0;
+    g_cmf_solve1_ns = 0;
+    g_cmf_pack0_ns = 0;
+    g_cmf_pack1_ns = 0;
+    g_cmf_swap_ns = 0;
+    g_cmf_misc_ns = 0;
+    g_cmf_calls = 0;
+    g_cmf_init_fallback_calls = 0;
+    g_cmf_generic_fallback_calls = 0;
+    g_cmf_unary_calls = 0;
+}
 
 namespace gbp {
 
@@ -232,8 +344,8 @@ void Factor::computeMessages(double eta_damping) {
         using Mat4 = Eigen::Matrix<double, 4, 4>;
 
         // Use raw pointers (avoid Map-return overhead in hot path).
-        const auto* eta_ptr_f = factor.etaData();
-        const auto* lam_ptr_f = factor.lamData();
+        const double* eta_ptr_f = factor.etaData();
+        const double* lam_ptr_f = factor.lamData();
         const Eigen::Map<const Vec4> eta_f0(eta_ptr_f);
         const Eigen::Map<const Mat4> lam_f0(lam_ptr_f);
 
@@ -255,17 +367,13 @@ void Factor::computeMessages(double eta_damping) {
         // target = 0 (to v0, eliminate v1)
         // ---------------------
         {
-            const auto eo = eta_f0.template segment<2>(0);
-            Vec2 eno = eta_f0.template segment<2>(2);
-            eno.noalias() += (b1_eta - old1_eta);
+            const Vec2 eo   = eta_f0.template segment<2>(0);
+            const Vec2 eno  = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
 
-            // --- lam blocks ---
-            const auto loo  = lam_f0.template block<2, 2>(0, 0);
-            const auto lono = lam_f0.template block<2, 2>(0, 2);
-            const auto lnoo = lam_f0.template block<2, 2>(2, 0);
-
-            // lnono: 你要在其上加 (b1_lam-old1_lam) 和 jitter，必须是 owning Mat2（显式拷贝）
-            Mat2 lnono = lam_f0.template block<2, 2>(2, 2);
+            const Mat2 loo   = lam_f0.template block<2, 2>(0, 0);
+            const Mat2 lono  = lam_f0.template block<2, 2>(0, 2);
+            const Mat2 lnoo  = lam_f0.template block<2, 2>(2, 0);
+            Mat2 lnono       = lam_f0.template block<2, 2>(2, 2);
             lnono.noalias() += (b1_lam - old1_lam);
             lnono.diagonal().array() += kJitter;
 
@@ -299,13 +407,12 @@ void Factor::computeMessages(double eta_damping) {
         // target = 1 (to v1, eliminate v0)
         // ---------------------
         {
-            const auto eo   = eta_f0.template segment<2>(2);
-            Vec2 eno = eta_f0.template segment<2>(0);
-            eno.noalias() += (b0_eta - old0_eta);
+            const Vec2 eo   = eta_f0.template segment<2>(2);
+            const Vec2 eno  = eta_f0.template segment<2>(0) + (b0_eta - old0_eta);
 
-            const auto loo   = lam_f0.template block<2, 2>(2, 2);
-            const auto lono  = lam_f0.template block<2, 2>(2, 0);
-            const auto lnoo  = lam_f0.template block<2, 2>(0, 2);
+            const Mat2 loo   = lam_f0.template block<2, 2>(2, 2);
+            const Mat2 lono  = lam_f0.template block<2, 2>(2, 0);
+            const Mat2 lnoo  = lam_f0.template block<2, 2>(0, 2);
             Mat2 lnono       = lam_f0.template block<2, 2>(0, 0);
             lnono.noalias() += (b0_lam - old0_lam);
             lnono.diagonal().array() += kJitter;
@@ -409,8 +516,18 @@ void Factor::computeMessages(double eta_damping) {
 }
 
 void Factor::computeMessagesFixedLam(double eta_damping) {
+    using Clock = std::chrono::high_resolution_clock;
+    const auto t_all0 = Clock::now();
+    g_cmf_calls.fetch_add(1, std::memory_order_relaxed);
+
+    auto add_ns = [](std::atomic<long long>& acc, const Clock::time_point& a, const Clock::time_point& b) {
+        acc.fetch_add((long long)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(),
+                      std::memory_order_relaxed);
+    };
+
     // 1) one-time init: do full update once
     if (!fixed_lam_valid_) {
+        const auto t0 = Clock::now();
         computeMessages(eta_damping);
 
         // Sync lambdas into ping-pong buffers to avoid stale lambdas after swap
@@ -420,32 +537,58 @@ void Factor::computeMessagesFixedLam(double eta_damping) {
             }
         }
 
+        const auto t1 = Clock::now();
+        add_ns(g_cmf_init_fallback_ns, t0, t1);
+        g_cmf_init_fallback_calls.fetch_add(1, std::memory_order_relaxed);
         fixed_lam_valid_ = true;
+
+        const auto t_all1 = Clock::now();
+        add_ns(g_cmf_total_ns, t_all0, t_all1);
         return;
     }
 
-    if (!active) return;
+    if (!active) {
+        const auto t_all1 = Clock::now();
+        add_ns(g_cmf_total_ns, t_all0, t_all1);
+        return;
+    }
 
     // Unary
     if (is_unary_) {
+        const auto t0 = Clock::now();
         auto& outMsg = messages_next[0];
         outMsg.etaRef().noalias() = factor.eta();
         outMsg.lamRef().noalias() = factor.lam();
+        const auto t1 = Clock::now();
+        add_ns(g_cmf_unary_ns, t0, t1);
+        g_cmf_unary_calls.fetch_add(1, std::memory_order_relaxed);
+
+        const auto ts0 = Clock::now();
         messages.swap(messages_next);
+        const auto ts1 = Clock::now();
+        add_ns(g_cmf_swap_ns, ts0, ts1);
+
+        const auto t_all1 = Clock::now();
+        add_ns(g_cmf_total_ns, t_all0, t_all1);
         return;
     }
 
     // Old messages (avoid Map-return overhead in the hot path)
-    const auto* old_eta0_ptr = messages[0].etaData();
-    const auto* old_eta1_ptr = messages[1].etaData();
-    const auto* old_lam0_ptr = messages[0].lamData();
-    const auto* old_lam1_ptr = messages[1].lamData();
+    const double* old_eta0_ptr = messages[0].etaData();
+    const double* old_eta1_ptr = messages[1].etaData();
+    const double* old_lam0_ptr = messages[0].lamData();
+    const double* old_lam1_ptr = messages[1].lamData();
 
     const double a = eta_damping;
 
-    // Only 2D-2D binary factors use the fixed-lam fast path
     if (!(d0_ == 2 && d1_ == 2 && D_ == 4)) {
+        const auto t0 = Clock::now();
         computeMessages(eta_damping);
+        const auto t1 = Clock::now();
+        add_ns(g_cmf_generic_fallback_ns, t0, t1);
+        g_cmf_generic_fallback_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto t_all1 = Clock::now();
+        add_ns(g_cmf_total_ns, t_all0, t_all1);
         return;
     }
 
@@ -455,10 +598,12 @@ void Factor::computeMessagesFixedLam(double eta_damping) {
         using Vec4 = Eigen::Matrix<double, 4, 1>;
         using Mat2 = Eigen::Matrix2d;
         using Mat4 = Eigen::Matrix<double, 4, 4>;
+        using Stride2 = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
 
+        const auto t_misc0 = Clock::now();
         // Factor blocks via raw pointers
-        const auto* eta_ptr_f = factor.etaData();
-        const auto* lam_ptr_f = factor.lamData();
+        const double* eta_ptr_f = factor.etaData();
+        const double* lam_ptr_f = factor.lamData();
         const Eigen::Map<const Vec4> eta_f0(eta_ptr_f);
         const Eigen::Map<const Mat4> lam_f0(lam_ptr_f);
 
@@ -473,53 +618,79 @@ void Factor::computeMessagesFixedLam(double eta_damping) {
         const Eigen::Map<const Vec2> b0_eta(b0.etaData());
         const Eigen::Map<const Vec2> b1_eta(b1.etaData());
 
+        const auto t_misc1 = Clock::now();
+        add_ns(g_cmf_misc_ns, t_misc0, t_misc1);
+
         // target=0
         {
-            const auto eo  = eta_f0.template segment<2>(0);
-            //const Vec2 eno = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
-            Vec2 eno = eta_f0.template segment<2>(2);
-            eno.noalias() += (b1_eta - old1_eta);
-            const auto lono = lam_f0.template block<2, 2>(0, 2);
-
-            // llt0_ was factorized from l_no,no in computeFactor()
+            const auto ts0 = Clock::now();
+            const Vec2 eo  = eta_f0.template segment<2>(0);
+            const Vec2 eno = eta_f0.template segment<2>(2) + (b1_eta - old1_eta);
+            const Mat2 lono = lam_f0.template block<2, 2>(0, 2);
             const Vec2 y = llt0_.solve(eno);
+            const auto ts1 = Clock::now();
+            add_ns(g_cmf_solve0_ns, ts0, ts1);
 
+            
             Vec2 outEta2 = eo - lono * y;
 
             if (a != 0.0) {
                 outEta2 *= (1.0 - a);
                 outEta2.noalias() += a * old0_eta;
             }
-
+            
+            const auto tp0 = Clock::now();
             utils::NdimGaussian& outMsg = messages_next[0];
+            // Raw pointer write-back (avoid Map-return overhead)
+            
             double* p = outMsg.etaData();
+            
             p[0] = outEta2[0];
             p[1] = outEta2[1];
+            const auto tp1 = Clock::now();
+            
+            
+            add_ns(g_cmf_pack0_ns, tp0, tp1);
         }
 
         // target=1
         {
-            const auto eo  = eta_f0.template segment<2>(2);
-            Vec2 eno = eta_f0.template segment<2>(0);
-            eno.noalias() += (b0_eta - old0_eta);
-            const auto lono = lam_f0.template block<2, 2>(2, 0);
-
+            const auto ts0 = Clock::now();
+            const Vec2 eo  = eta_f0.template segment<2>(2);
+            const Vec2 eno = eta_f0.template segment<2>(0) + (b0_eta - old0_eta);
+            const Mat2 lono = lam_f0.template block<2, 2>(2, 0);
             const Vec2 y = llt1_.solve(eno);
+            
+            const auto ts1 = Clock::now();
+            add_ns(g_cmf_solve1_ns, ts0, ts1);
+
 
             Vec2 outEta2 = eo - lono * y;
+
 
             if (a != 0.0) {
                 outEta2 *= (1.0 - a);
                 outEta2.noalias() += a * old1_eta;
             }
 
+            
+            const auto tp0 = Clock::now();
             utils::NdimGaussian& outMsg = messages_next[1];
             double* p = outMsg.etaData();
             p[0] = outEta2[0];
             p[1] = outEta2[1];
+            
+            const auto tp1 = Clock::now();
+            add_ns(g_cmf_pack1_ns, tp0, tp1);
         }
 
+        const auto ts0 = Clock::now();
         messages.swap(messages_next);
+        const auto ts1 = Clock::now();
+        add_ns(g_cmf_swap_ns, ts0, ts1);
+
+        const auto t_all1 = Clock::now();
+        add_ns(g_cmf_total_ns, t_all0, t_all1);
         return;
     }
 }

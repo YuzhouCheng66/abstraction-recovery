@@ -51,6 +51,7 @@ public:
     // Zero-cost accessors (no Map construction, no cache flags touched).
     // Return nullptr iff dim()==0.
     const double* etaData() const noexcept {
+        if (dim_ == 0) return nullptr;
         return (dim_ == 2) ? eta2_.data() : eta_.data();
     }
     double* etaData() noexcept {
@@ -58,6 +59,7 @@ public:
     }
 
     const double* lamData() const noexcept {
+        if (dim_ == 0) return nullptr;
         return (dim_ == 2) ? lam2_.data() : lam_.data();
     }
     double* lamData() noexcept {

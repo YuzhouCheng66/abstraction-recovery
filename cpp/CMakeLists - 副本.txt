@@ -8,30 +8,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
   add_definitions(-DEIGEN_NO_DEBUG)
 
-  # ---- Common: treat Release + ReleaseWithDebInfo as "production-optimized"
-  # Use generator expressions so it works for multi-config generators (VS).
-  foreach(cfg Release ReleaseWithDebInfo)
-    add_compile_options($<$<CONFIG:${cfg}>:/O2>)
-    add_compile_options($<$<CONFIG:${cfg}>:/Ob3>)
-    #add_compile_options($<$<CONFIG:${cfg}>:/GL>)
-    add_compile_options($<$<CONFIG:${cfg}>:/arch:AVX2>)
-    add_compile_options($<$<CONFIG:${cfg}>:/DNDEBUG>)
+  # Release optimizations (append, do not overwrite defaults)
+  add_compile_options($<$<CONFIG:Release>:/Ob3>)
+  add_compile_options($<$<CONFIG:Release>:/GL>)
+  add_compile_options($<$<CONFIG:Release>:/arch:AVX2>)
+  add_compile_options($<$<CONFIG:Release>:/DNDEBUG>)
 
-    #add_link_options($<$<CONFIG:${cfg}>:/LTCG>)
-    add_link_options($<$<CONFIG:${cfg}>:/OPT:REF>)
-    add_link_options($<$<CONFIG:${cfg}>:/OPT:ICF>)
-  endforeach()
-
-  # ---- Debug symbols for VTune (ReleaseWithDebInfo only)
-  # /Zi + /DEBUG gives PDB + source line resolution in VTune.
-  add_compile_options($<$<CONFIG:ReleaseWithDebInfo>:/Zi>)
-  add_link_options($<$<CONFIG:ReleaseWithDebInfo>:/DEBUG>)
-  # Optional but often helps call stacks / line mapping with LTCG:
-  add_link_options($<$<CONFIG:ReleaseWithDebInfo>:/DEBUG:FULL>)
-
-  # Optional: keep frame pointers for better stacks (small overhead)
-  # add_compile_options($<$<CONFIG:ReleaseWithDebInfo>:/Oy->)
-
+  add_link_options($<$<CONFIG:Release>:/LTCG>)
+  add_link_options($<$<CONFIG:Release>:/OPT:REF>)
+  add_link_options($<$<CONFIG:Release>:/OPT:ICF>)
 endif()
 # =====================================================
 
@@ -44,6 +29,10 @@ set(VCPKG_INSTALLED_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TRIPLET}")
 set(VCPKG_INCLUDE_DIR   "${VCPKG_INSTALLED_DIR}/include")
 set(VCPKG_LIB_DIR       "${VCPKG_INSTALLED_DIR}/lib")
 
+# ==================== Profiling toggle ====================
+# OFF by default: profiling macros compile to nothing; print/reset still exist (disabled messages).
+option(GBP_ENABLE_PROFILING "Enable GBP profiling instrumentation (-DGBP_PROFILE)" OFF)
+# ==========================================================
 
 # ==================== Core library ====================
 add_library(ndim_gaussian
@@ -52,6 +41,7 @@ add_library(ndim_gaussian
   src/gbp/VariableNode.cpp
   src/gbp/FactorGraph.cpp
   src/gbp/HierarchyGBP.cpp
+  src/gbp/Profiling.cpp          # ✅ add this
 )
 
 target_include_directories(ndim_gaussian
@@ -66,6 +56,10 @@ if(OpenMP_CXX_FOUND)
   target_link_libraries(ndim_gaussian PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# Enable profiling define (optional)
+if(GBP_ENABLE_PROFILING)
+  target_compile_definitions(ndim_gaussian PRIVATE GBP_PROFILE)
+endif()
 
 # ==================== CHOLMOD (SuiteSparse via vcpkg) ====================
 target_link_directories(ndim_gaussian PRIVATE "${VCPKG_LIB_DIR}")
@@ -102,6 +96,7 @@ add_executable(test_hierarchy_gbp
 target_link_libraries(test_hierarchy_gbp PRIVATE ndim_gaussian slam_graph)
 target_link_directories(test_hierarchy_gbp PRIVATE "${VCPKG_LIB_DIR}")
 
+# Nonlinear SE(2) GN / GBP / V-loop test
 add_executable(test_hierarchy_gbp_nonlinear
   src/slam/test_hierarchy_gbp_nonlinear.cpp
 )

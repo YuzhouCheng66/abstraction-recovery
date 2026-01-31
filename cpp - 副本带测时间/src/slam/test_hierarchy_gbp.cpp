@@ -213,7 +213,7 @@ int main() {
         if (!vptr) continue;
         auto& v = *vptr;
 
-        v.belief = v.prior;}
+        v.belief = v.prior;
 
     std::cout << "  ✓ Initialized\n\n";
 
@@ -240,14 +240,13 @@ int main() {
     Eigen::VectorXd mu_stacked = Eigen::VectorXd::Zero(N*2);
     int off = 0;
     for (const auto& vptr : gbp_graph.var_nodes) {
-        auto& v = *vptr;
         mu_stacked.segment(off, v.dofs) = v.prior.mu();
         off += v.dofs;
     }
     double e_prev = energyMapFromStackedMu(gbp_graph, mu_stacked, J.var_ix);
     int counter = 0;
     const int max_iters = 2000;
-    const double thr = 0;
+    const double thr = 1e-2;
     const int patience = 2;
 
     t0 = std::chrono::high_resolution_clock::now();
@@ -258,13 +257,20 @@ int main() {
     gbp_graph.synchronousIteration();   // warm-up
 
     // Reset profiling counters AFTER warm-up (so ratios reflect steady-state)
+    gbp::resetSyncFixedLamProfile();
+    resetComputeMessagesFixedLamProfile();
+    gbp::resetUpdateBeliefProfile();
     for (int it = 0; it < max_iters; ++it) {
         // Reset again at the transition into FixedLam phase (it==101) to profile FixedLam only
+        if (it == 101) {
+            gbp::resetSyncFixedLamProfile();
+            resetComputeMessagesFixedLamProfile();
+            gbp::resetUpdateBeliefProfile();
+        }
 
         auto sync_start = std::chrono::high_resolution_clock::now();
         //gbp_graph.residualIterationVarHeap(gbp_graph.var_nodes.size());
         if (it > 100) {
-            //gbp_graph.synchronousIteration();
             gbp_graph.synchronousIterationFixedLam();
         } else {
         gbp_graph.synchronousIteration();
@@ -274,10 +280,10 @@ int main() {
         sync_total += (sync_end - sync_start);
         ++sync_iters;
 
+        double e = energyMapFromGraphMu(gbp_graph);
+        double de = std::abs(e_prev - e);
 
-        if ((it + 1) % 100 == 0 || it < 10) {
-            double e = energyMapFromGraphMu(gbp_graph);
-            double de = std::abs(e_prev - e);
+        if ((it + 1) % 10 == 0 || it < 20) {
             std::cout << "BGraph Iter " << std::setw(4) << (it + 1)
                       << " | Energy = " << std::setw(12) << e
                       << " | ΔE = " << std::scientific << std::setprecision(3) << de
@@ -285,7 +291,6 @@ int main() {
                       << " | gap_to_MAP = " << (e - e_opt) << "\n";
         }
 
-        /*
         if (de < thr) {
             counter++;
             if (counter >= patience) {
@@ -297,19 +302,23 @@ int main() {
         } else {
             counter = 0;
         }
+
         e_prev = e;
-        */
     }
+
+    // Print split timing for the FixedLam phase (if used).
+    gbp::printSyncFixedLamProfile();
+    printComputeMessagesFixedLamProfile();
+    gbp::printUpdateBeliefProfile();
 
     t1 = std::chrono::high_resolution_clock::now();
     ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    std::cout << "\nOptimization time: " << sync_total.count() * 1000.0 << " ms\n";
+    std::cout << "\nOptimization time: " << ms << " ms\n";
     if (sync_iters > 0) {
         double avg_sync_ms = 1000.0 * sync_total.count() / sync_iters;
         std::cout << "Average synchronousIteration() time per iter: " << avg_sync_ms << " ms\n";
     }
 
-    /*
     // ---------------- Step 4.5: HierarchyGBP (super) quick test ----------------
     std::cout << "\nStep 4.5: HierarchyGBP super-graph quick test...\n";
     std::cout << "  Build super graph (order grouping), bottom-up inject base beliefs, run a few super iterations.\n";
@@ -466,7 +475,7 @@ int main() {
 
     // ---- (B) build super1 from base (outside vLoop) ----
     std::cout << "  [Init] build super1 from base...\n";
-    auto super1 = H.buildSuperFromBase(base_ptr, 0.0);
+    auto super1 = H.buildSuperFromBase(base_ptr, /*eta_damping=*/0.0);
     H.bottomUpUpdateSuper(base_ptr, super1);
 
     // ---- (C) super1: ensure it has run at least once ----
@@ -476,8 +485,8 @@ int main() {
 
     // ---- (D) build abs1 from super1 (outside vLoop) ----
     std::cout << "  [Init] build abs1 from super1...\n";
-    auto abs1 = H.buildAbsFromSuper(super1->graph, 2, 0.0);
-    H.bottomUpUpdateAbs(super1->graph, abs1, 2, 0.0);
+    auto abs1 = H.buildAbsFromSuper(super1->graph, /*r_reduced=*/2, /*eta_damping=*/0.0);
+    H.bottomUpUpdateAbs(super1->graph, abs1, /*r_reduced=*/2, /*eta_damping=*/0.0);
 
     // ---- (E) abs1: ensure it has run at least once ----
     std::cout << "  [Init] abs1: one synchronousIteration() before building super2...\n";
@@ -486,7 +495,7 @@ int main() {
 
     // ---- (F) build super2 from abs1 (treating abs1 as base for next level) ----
     std::cout << "  [Init] build super2 from abs1...\n";
-    auto super2 = H.buildSuperFromBase(abs1->graph, 0.0);
+    auto super2 = H.buildSuperFromBase(abs1->graph, /*eta_damping=*/0.0);
     H.bottomUpUpdateSuper(abs1->graph, super2);
 
     // ---- (G) super2: ensure it has run at least once ----
@@ -496,8 +505,8 @@ int main() {
 
     // ---- (H) build abs2 from super2 (outside vLoop) ----
     std::cout << "  [Init] build abs2 from super2...\n";
-    auto abs2 = H.buildAbsFromSuper(super2->graph, 2, 0.0);
-    H.bottomUpUpdateAbs(super2->graph, abs2, 2, 0.0);
+    auto abs2 = H.buildAbsFromSuper(super2->graph, /*r_reduced=*/2, /*eta_damping=*/0.0);
+    H.bottomUpUpdateAbs(super2->graph, abs2, /*r_reduced=*/2, /*eta_damping=*/0.0);
 
     // ---- (I) abs2: ensure it has run at least once ----
     std::cout << "  [Init] abs2: one synchronousIteration() before building super3...\n";
@@ -506,7 +515,7 @@ int main() {
 
     // ---- (J) build super3 from abs2 (treating abs2 as base for next level) ----
     //std::cout << "  [Init] build super3 from abs2...\n";
-    //auto super3 = H.buildSuperFromBase(abs2->graph, 0.0);
+    //auto super3 = H.buildSuperFromBase(abs2->graph, /*eta_damping=*/0.0);
     //H.bottomUpUpdateSuper(abs2->graph, super3);
 
     // ---- (K) super3: ensure it has run at least once ----
@@ -516,8 +525,8 @@ int main() {
 
     // ---- (L) build abs3 from super3 (outside vLoop) ----
     //std::cout << "  [Init] build abs3 from super3...\n";
-    //auto abs3 = H.buildAbsFromSuper(super3->graph, 2, 0.0);
-    //H.bottomUpUpdateAbs(super3->graph, abs3, 2, 0.0);
+    //auto abs3 = H.buildAbsFromSuper(super3->graph, /*r_reduced=*/2, /*eta_damping=*/0.0);
+    //H.bottomUpUpdateAbs(super3->graph, abs3, /*r_reduced=*/2, /*eta_damping=*/0.0);
 
     // ---- pack 5 layers for vLoop ----
     std::vector<gbp::HierarchyGBP::VLayerEntry> vLayers;
@@ -553,6 +562,97 @@ int main() {
     for (int it = 0; it < 2; ++it) {
         auto vloop_start = std::chrono::high_resolution_clock::now();
         H.vLoop(vLayers, 2, 0.4);
+        /*
+        // ========== BOTTOM-UP ========== //
+        auto t0 = std::chrono::high_resolution_clock::now();
+
+        // super1: no bottom-up modify, just iteration
+        auto t1 = std::chrono::high_resolution_clock::now();
+        vLayers[1].graph->synchronousIteration(false);
+        auto t2 = std::chrono::high_resolution_clock::now();
+        t_super1_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // abs1: bottom-up update + iteration
+        t1 = std::chrono::high_resolution_clock::now();
+        H.bottomUpUpdateAbs(vLayers[1].graph, abs1, 2, 0.0);
+        vLayers[2].graph = abs1->graph;
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs1_bottomUp += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[2].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs1_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // super2: bottom-up update + iteration
+        t1 = std::chrono::high_resolution_clock::now();
+        H.bottomUpUpdateSuper(vLayers[2].graph, super2);
+        vLayers[3].graph = super2->graph;
+        t2 = std::chrono::high_resolution_clock::now();
+        t_super2_bottomUp += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[3].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_super2_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // abs2: bottom-up update + iteration
+        t1 = std::chrono::high_resolution_clock::now();
+        H.bottomUpUpdateAbs(vLayers[3].graph, abs2, 2, 0.0);
+        vLayers[4].graph = abs2->graph;
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs2_bottomUp += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[4].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs2_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // ========== TOP-DOWN ========== //
+        // abs2: iteration + top-down to super2
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[4].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs2_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        H.topDownModifySuperFromAbs(vLayers[3].graph, abs2);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs2_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // super2: iteration + top-down to abs1
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[3].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_super2_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        H.topDownModifyBaseFromSuper(vLayers[2].graph, super2);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_super2_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // abs1: iteration + top-down to super1
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[2].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs1_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        H.topDownModifySuperFromAbs(vLayers[1].graph, abs1);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_abs1_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        // super1: iteration + top-down to base
+        t1 = std::chrono::high_resolution_clock::now();
+        vLayers[1].graph->synchronousIteration(false);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_super1_topDown_iter += std::chrono::duration<double, std::milli>(t2 - t1).count();
+
+        t1 = std::chrono::high_resolution_clock::now();
+        H.topDownModifyBaseFromSuper(vLayers[0].graph, super1);
+        t2 = std::chrono::high_resolution_clock::now();
+        t_super1_topDown += std::chrono::duration<double, std::milli>(t2 - t1).count();
+        */
         auto vloop_end = std::chrono::high_resolution_clock::now();
         vloop_total += (vloop_end - vloop_start);
         ++iters_done;
@@ -610,8 +710,6 @@ int main() {
 
     std::cout << "\n=== Test Complete ===\n";
     return 0;
-    */
-
-
+}
 }
 

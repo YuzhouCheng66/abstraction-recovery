@@ -16,12 +16,6 @@
 #include "gbp/MultiQueue.h"
 
 namespace gbp {
-
-// Profiling utilities for FactorGraph::synchronousIterationFixedLam
-// Wall-clock split: (1) factor message update, (2) variable belief update.
-void resetSyncFixedLamProfile();
-void printSyncFixedLamProfile();
-
 class FactorGraph {
 public:
     FactorGraph() = default;

@@ -403,7 +403,6 @@ gbp::FactorGraph buildNoisyPoseGraphSE2(
 
     if (N > 0) {
         var_ptrs[0]->prior.setEta(Lam_weak * var_ptrs[0]->GT.head<3>());
-        var_ptrs[0]->mu = var_ptrs[0]->GT;
     }
 
     for (int i = 0; i < N - 1; ++i) {
@@ -422,7 +421,6 @@ gbp::FactorGraph buildNoisyPoseGraphSE2(
 
         auto* v = var_ptrs[i+1];
         v->prior.setEta(Lam_weak * v_mu_estated);
-        v->mu = v_mu_estated;
     }
 
     // ---------- Linearize all factors at current mu ----------
@@ -436,7 +434,7 @@ gbp::FactorGraph buildNoisyPoseGraphSE2(
         Eigen::VectorXd linpoint(total);
         int off = 0;
         for (auto* vn : f->adj_var_nodes) {
-            linpoint.segment(off, vn->dofs) = vn->mu;
+            linpoint.segment(off, vn->dofs) = vn->prior.mu();
             off += vn->dofs;
         }
 

@@ -13,6 +13,51 @@
 
 namespace gbp {
 
+// ===== Profiling counters for synchronousIterationFixedLam (wall-clock) =====
+// These counters capture the wall time spent inside the two main phases of
+// FactorGraph::synchronousIterationFixedLam():
+//   (1) factor->computeMessagesFixedLam(...)
+//   (2) var->updateBelief()
+// The counters are process-wide and thread-safe.
+static std::atomic<long long> g_sync_fl_calls{0};
+static std::atomic<long long> g_sync_fl_msgs_ns{0};
+static std::atomic<long long> g_sync_fl_belief_ns{0};
+static std::atomic<long long> g_sync_fl_total_ns{0};
+
+void resetSyncFixedLamProfile() {
+    g_sync_fl_calls.store(0, std::memory_order_relaxed);
+    g_sync_fl_msgs_ns.store(0, std::memory_order_relaxed);
+    g_sync_fl_belief_ns.store(0, std::memory_order_relaxed);
+    g_sync_fl_total_ns.store(0, std::memory_order_relaxed);
+}
+
+void printSyncFixedLamProfile() {
+    const long long calls = g_sync_fl_calls.load(std::memory_order_relaxed);
+    const long long total_ns = g_sync_fl_total_ns.load(std::memory_order_relaxed);
+    const long long msgs_ns  = g_sync_fl_msgs_ns.load(std::memory_order_relaxed);
+    const long long bel_ns   = g_sync_fl_belief_ns.load(std::memory_order_relaxed);
+
+    if (calls <= 0) {
+        std::cout << "[synchronousIterationFixedLam Profile] No calls.\n";
+        return;
+    }
+
+    const double total_ms = (double)total_ns * 1e-6;
+    const double msgs_ms  = (double)msgs_ns  * 1e-6;
+    const double bel_ms   = (double)bel_ns   * 1e-6;
+    const double avg_total = total_ms / (double)calls;
+    const double avg_msgs  = msgs_ms  / (double)calls;
+    const double avg_bel   = bel_ms   / (double)calls;
+
+    std::cout
+        << "[synchronousIterationFixedLam Profile] calls=" << calls
+        << " total=" << total_ms << " ms (avg " << avg_total << " ms/call)\n"
+        << "  - computeMessagesFixedLam: " << msgs_ms
+        << " ms (avg " << avg_msgs << " ms/call)\n"
+        << "  - updateBelief:            " << bel_ms
+        << " ms (avg " << avg_bel << " ms/call)\n";
+}
+
 FactorGraph::~FactorGraph() {
     if (!locks_initialized) return;
     for (auto& lk : var_locks) omp_destroy_lock(&lk);
@@ -112,7 +157,7 @@ void FactorGraph::connect(Factor* f, VariableNode* v, int local_idx) {
 
 void FactorGraph::synchronousIteration(bool /*robustify*/) {
     // 1) factor messages (OpenMP并行)
-    //#pragma omp parallel for schedule(guided)
+    #pragma omp parallel for schedule(guided)
     for (int i = 0; i < (int)factors.size(); ++i) {
         auto& fptr = factors[i];
         if (!fptr->active) continue;
@@ -120,7 +165,7 @@ void FactorGraph::synchronousIteration(bool /*robustify*/) {
     }
 
     // 2) variable beliefs (OpenMP并行)
-    //#pragma omp parallel for schedule(guided)
+    #pragma omp parallel for schedule(guided)
     for (int i = 0; i < (int)var_nodes.size(); ++i) {
         auto& vptr = var_nodes[i];
         if (!vptr) continue;
@@ -130,26 +175,41 @@ void FactorGraph::synchronousIteration(bool /*robustify*/) {
 }
 
 void FactorGraph::synchronousIterationFixedLam(bool /*robustify*/) {
+    const auto t_all0 = std::chrono::high_resolution_clock::now();
+
     // 1) factor messages (OpenMP并行)
-    {
-        //#pragma omp parallel for schedule(guided)
-        for (int i = 0; i < (int)factors.size(); ++i) {
-            auto& fptr = factors[i];
-            if (!fptr || !fptr->active) continue;
-            fptr->computeMessagesFixedLam(eta_damping);
-        }
+    const auto t_msg0 = std::chrono::high_resolution_clock::now();
+    #pragma omp parallel for schedule(guided)
+    for (int i = 0; i < (int)factors.size(); ++i) {
+        auto& fptr = factors[i];
+        if (!fptr || !fptr->active) continue;
+        fptr->computeMessagesFixedLam(eta_damping);
     }
+    const auto t_msg1 = std::chrono::high_resolution_clock::now();
 
     // 2) variable beliefs (OpenMP并行)
-    {
-        //#pragma omp parallel for schedule(guided)
-        for (int i = 0; i < (int)var_nodes.size(); ++i) {
-            auto& vptr = var_nodes[i];
-            if (!vptr) continue;
-            vptr->updateBelief();
-        }
+    const auto t_bel0 = std::chrono::high_resolution_clock::now();
+    #pragma omp parallel for schedule(guided)
+    for (int i = 0; i < (int)var_nodes.size(); ++i) {
+        auto& vptr = var_nodes[i];
+        if (!vptr) continue;
+        vptr->updateBelief();
     }
+    const auto t_bel1 = std::chrono::high_resolution_clock::now();
+
+    const auto t_all1 = std::chrono::high_resolution_clock::now();
+
+    const long long msg_ns = (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(t_msg1 - t_msg0).count();
+    const long long bel_ns = (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(t_bel1 - t_bel0).count();
+    const long long all_ns = (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(t_all1 - t_all0).count();
+
+    g_sync_fl_calls.fetch_add(1, std::memory_order_relaxed);
+    g_sync_fl_msgs_ns.fetch_add(msg_ns, std::memory_order_relaxed);
+    g_sync_fl_belief_ns.fetch_add(bel_ns, std::memory_order_relaxed);
+    g_sync_fl_total_ns.fetch_add(all_ns, std::memory_order_relaxed);
 }
+
+
 
 void FactorGraph::relinearizeAllFactors() {
     // Explicit Gauss-Newton style re-linearization.
@@ -170,7 +230,7 @@ void FactorGraph::relinearizeAllFactors() {
         int off = 0;
         for (auto* vn : f->adj_var_nodes) {
             if (!vn) continue;
-            linpoint.segment(off, vn->dofs) = vn->mu;
+            linpoint.segment(off, vn->dofs) = vn->belief.mu();
             off += vn->dofs;
         }
 

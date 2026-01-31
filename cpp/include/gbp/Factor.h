@@ -1,24 +1,12 @@
 #pragma once
-
 #include <Eigen/Dense>
 #include <Eigen/Cholesky>
 #include <vector>
 #include <cassert>
 #include <functional>
 #include <stdexcept>
-
 #include "NdimGaussian.h"
 
-
-// Profiling utilities for computeFactor analysis
-void printComputeFactorProfile();
-void resetComputeFactorProfile();
-
-// Profiling utilities for computeMessagesFixedLam (synchronous fixed-lam iteration)
-void printComputeMessagesFixedLamProfile();
-void resetComputeMessagesFixedLamProfile();
-
-//
 
 namespace gbp {
 
