@@ -743,7 +743,7 @@ class Factor:
                 lnoo = lam_factor[:divide, divide:]
                 lnono = lam_factor[:divide, :divide]
 
-            lnono += 1e-14 * np.eye(lnono.shape[0])
+            lnono += 1e-10 * np.eye(lnono.shape[0])
             # concat RHS
             rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
             # try-except 注释，仅保留原 try 内容
