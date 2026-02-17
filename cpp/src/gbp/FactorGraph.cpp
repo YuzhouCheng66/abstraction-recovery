@@ -112,7 +112,9 @@ void FactorGraph::connect(Factor* f, VariableNode* v, int local_idx) {
 
 void FactorGraph::synchronousIteration(bool /*robustify*/) {
     // 1) factor messages (OpenMP并行)
+    
     //#pragma omp parallel for schedule(guided)
+    omp_set_num_threads(12);
     for (int i = 0; i < (int)factors.size(); ++i) {
         auto& fptr = factors[i];
         if (!fptr->active) continue;
@@ -130,25 +132,21 @@ void FactorGraph::synchronousIteration(bool /*robustify*/) {
 }
 
 void FactorGraph::synchronousIterationFixedLam(bool /*robustify*/) {
-    // 1) factor messages (OpenMP并行)
-    {
+    // 1) factor messages (OpenMP并行) 
         //#pragma omp parallel for schedule(guided)
         for (int i = 0; i < (int)factors.size(); ++i) {
             auto& fptr = factors[i];
             if (!fptr || !fptr->active) continue;
             fptr->computeMessagesFixedLam(eta_damping);
         }
-    }
 
     // 2) variable beliefs (OpenMP并行)
-    {
         //#pragma omp parallel for schedule(guided)
         for (int i = 0; i < (int)var_nodes.size(); ++i) {
             auto& vptr = var_nodes[i];
             if (!vptr) continue;
             vptr->updateBelief();
         }
-    }
 }
 
 void FactorGraph::relinearizeAllFactors() {

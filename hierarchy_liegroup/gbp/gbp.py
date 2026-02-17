@@ -2,6 +2,7 @@
     Defines classes for variable nodes, factor nodes and edges and factor graph.
 """
 
+import manifpy
 import numpy as np
 import time
 import scipy.linalg
@@ -11,6 +12,7 @@ from utils.distances import bhattacharyya, mahalanobis
 
 #from amg import classes as amg_cls
 #from amg import functions as amg_fnc
+
 
 class FactorGraph:
     def __init__(self,
@@ -618,17 +620,19 @@ class VariableNode:
         # Update local belief
         eta = self.prior.eta.copy()
         lam = self.prior.lam.copy()
+        
         for factor in self.adj_factors:
             message_ix = factor.adj_var_nodes.index(self)
-            eta_inward, lam_inward = factor.messages[message_ix].eta, factor.messages[message_ix].lam
-            eta += eta_inward
-            lam += lam_inward
+            tao_inward, lam_inward = factor.messages[message_ix].mu, factor.messages[message_ix].lam
+            mu_inward = tao_inward.coeffs()
+            J = tao_inward.rjac()
+            lam_i = J.T @ lam_inward @ J
+            lam += lam_i
+            eta += lam_i @ mu_inward
 
         self.belief.eta = eta 
         self.belief.lam = lam
-
-        self.Sigma = np.linalg.inv(self.belief.lam)
-        self.mu = self.Sigma @ self.belief.eta
+        self.mu = np.linalg.solve(self.belief.lam, self.belief.eta)
         
         # Send belief to adjacent factors
         for factor in self.adj_factors:
@@ -921,8 +925,17 @@ class Factor:
             v = 0
             if self.b_calc_mess_dist:
                 self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            self.messages[v].eta = self.factor.eta.copy()
-            self.messages[v].lam = self.factor.lam.copy()
+
+            new_message_tau = manifpy.SE2Tangent(np.linalg.solve(self.factor.lam, self.factor.eta))
+
+            r_inv = np.linalg.inv(new_message_tau.rjac())
+            new_message_lam = r_inv.T @ self.factor.lam @ r_inv
+            new_message_eta = new_message_lam @ new_message_tau.coeffs()
+
+            self.messages[v].mu = new_message_tau
+            self.messages[v].eta = new_message_eta
+            self.messages[v].lam = new_message_lam
+            
             return
         
         
@@ -938,9 +951,16 @@ class Factor:
             mess_start_dim = 0
             for var in range(len(self.adj_vIDs)):
                 if var != v:
+                    tao_inward, lam_inward = self.messages[var].mu, self.messages[var].lam
+                    mu_inward = tao_inward.coeffs()
+
+                    J = tao_inward.rjac()
+                    lam_i = J.T @ lam_inward @ J
+                    eta_i = lam_i @ mu_inward
+
                     var_dofs = self.adj_var_nodes[var].dofs
-                    eta_factor[mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].eta - self.messages[var].eta
-                    lam_factor[mess_start_dim:mess_start_dim + var_dofs, mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].lam - self.messages[var].lam
+                    eta_factor[mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].eta - eta_i
+                    lam_factor[mess_start_dim:mess_start_dim + var_dofs, mess_start_dim:mess_start_dim + var_dofs] += self.adj_beliefs[var].lam - lam_i
                 mess_start_dim += self.adj_var_nodes[var].dofs
 
             # Divide up parameters of distribution
@@ -966,19 +986,19 @@ class Factor:
             lnono_inv = np.linalg.inv(lnono)
 
             new_message_lam = loo - lono @ lnono_inv @ lnoo
-            messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
             new_message_eta = eo - lono @ lnono_inv @ eno
-            messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
 
+            new_message_tau = manifpy.SE2Tangent(np.linalg.solve(new_message_lam, new_message_eta))
 
-            
-        for v in range(len(self.adj_vIDs)):
-            #self.messages_dist[v] = bhattacharyya(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            if self.b_calc_mess_dist:
-                self.messages_dist[v] = mahalanobis(self.messages[v], NdimGaussian(len(messages_eta[v]), eta=messages_eta[v], lam=messages_lam[v]))
-            self.messages[v].lam = messages_lam[v]
-            self.messages[v].eta = messages_eta[v]
+            r_inv = np.linalg.inv(new_message_tau.rjac())
+            new_message_lam = r_inv.T @ new_message_lam @ r_inv
+            new_message_eta = new_message_lam @ new_message_tau.coeffs()
 
+            #messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
+            #messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
+            self.messages[v].mu = new_message_tau
+            self.messages[v].lam = new_message_lam
+            self.messages[v].eta = new_message_eta
 
         #time.sleep(0.00000001)
 

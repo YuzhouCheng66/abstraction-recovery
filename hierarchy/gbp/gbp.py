@@ -56,7 +56,7 @@ class FactorGraph:
             self.num_undamped_iters = num_undamped_iters  # Number of undamped iterations after relinearisation before damping is set to 0.4
             self.min_linear_iters = min_linear_iters  # Minimum number of linear iterations before a factor is allowed to realinearise.
 
-    def compute_all_messages(self, factors=None, level=None, local_relin=True):
+    def compute_all_messages(self, factors=None, level=None, local_relin=True, fixed_lam=False):
         if factors is None:
             factors = self.factors[:self.n_factor_nodes]
         if level is not None:
@@ -67,9 +67,9 @@ class FactorGraph:
                 if self.nonlinear_factors and local_relin:
                     if factor.iters_since_relin == self.num_undamped_iters:
                         factor.eta_damping = self.eta_damping
-                    factor.compute_messages(factor.eta_damping)
+                    factor.compute_messages(factor.eta_damping, fixed_lam=fixed_lam)
                 else:
-                    factor.compute_messages(self.eta_damping)
+                    factor.compute_messages(self.eta_damping, fixed_lam=fixed_lam)
 
     def update_all_beliefs(self, vars=None, level=None, smoothing=False):
         if vars is None:
@@ -103,7 +103,7 @@ class FactorGraph:
             for factor in self.factors:
                 adj_belief_means = np.array([])
                 for belief in factor.adj_beliefs:
-                    adj_belief_means = np.concatenate((adj_belief_means, 1/np.diagonal(belief.lam) * belief.eta))
+                    adj_belief_means = np.concatenate((adj_belief_means, np.linalg.solve(belief.lam, belief.eta)))
                 if np.linalg.norm(factor.linpoint - adj_belief_means) > self.beta and factor.iters_since_relin >= self.min_linear_iters:
                     factor.compute_factor(linpoint=adj_belief_means)
                     factor.iters_since_relin = 0
@@ -115,7 +115,7 @@ class FactorGraph:
         for factor in self.factors[:self.n_factor_nodes]:
             factor.robustify_loss()
 
-    def synchronous_iteration(self, factors=None, level=None, local_relin=True, robustify=False):
+    def synchronous_iteration(self, factors=None, level=None, local_relin=True, robustify=False, fixed_lam=False):
         if level is not None:
             vars = self.multigrid_vars[level]
             factors = self.multigrid_factors[level]
@@ -128,7 +128,7 @@ class FactorGraph:
         if self.nonlinear_factors and local_relin:
             self.relinearise_factors(factors)
 
-        self.compute_all_messages(factors, local_relin=local_relin)
+        self.compute_all_messages(factors, local_relin=local_relin, fixed_lam=fixed_lam)
         self.update_all_beliefs(vars)
 
 
@@ -640,7 +640,8 @@ class Factor:
         
         for i in range(len(J)):
             lambda_factor += J[i].T @ self.measurement_lambda[i] @ J[i]
-            eta_factor += J[i].T @ (self.measurement_lambda[i] @ (J[i] @ self.linpoint + self.measurement[i] - pred_measurement[i]))
+            #eta_factor += J[i].T @ (self.measurement_lambda[i] @ (J[i] @ self.linpoint + self.measurement[i] - pred_measurement[i]))
+            eta_factor += J[i].T @ (self.measurement_lambda[i] @ (self.measurement[i] - pred_measurement[i]))
 
         if update_self:
             self.factor.eta, self.factor.lam = eta_factor, lambda_factor
@@ -697,7 +698,7 @@ class Factor:
             self.iters_since_relin += 1
 
     #@profile
-    def compute_messages(self, eta_damping):
+    def compute_messages(self, eta_damping, fixed_lam=False):
         """
             Compute all outgoing messages from the factor.
             This is specialised for one and two variable factors.
@@ -742,7 +743,7 @@ class Factor:
                 lnoo = lam_factor[:divide, divide:]
                 lnono = lam_factor[:divide, :divide]
 
-            lnono += 1e-12 * np.eye(lnono.shape[0])
+            lnono += 1e-14 * np.eye(lnono.shape[0])
             # concat RHS
             rhs_j = np.concatenate([lnoo, eno.reshape(-1, 1)], axis=1)   # (n, n+1)
             # try-except 注释，仅保留原 try 内容
@@ -757,7 +758,10 @@ class Factor:
 
             new_message_lam = loo - lono @ X_lam
             new_message_eta = eo  - lono @ X_eta
-            messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
+            if fixed_lam:
+                messages_lam.append(self.messages[v].lam)
+            else:
+                messages_lam.append((1 - eta_damping) * new_message_lam + eta_damping * self.messages[v].lam)
             messages_eta.append((1 - eta_damping) * new_message_eta + eta_damping * self.messages[v].eta)
 
 
@@ -768,6 +772,7 @@ class Factor:
 
         #time.sleep(0.00000001)
 
+    
 
     def compute_messages_from_v(self, v, eta_damping):
         """
