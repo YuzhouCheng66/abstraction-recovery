@@ -350,12 +350,11 @@ class Factor:
 
         for jac_block, lam_z, meas, pred in zip(J, self.measurement_lambda, self.measurement, pred_measurement):
             lambda_factor += jac_block.T @ lam_z @ jac_block
-            eta_factor += jac_block.T @ (lam_z @ (jac_block @ self.linpoint + meas - pred))
+            eta_factor += jac_block.T @ (lam_z @ (meas - pred))
 
         if update_self:
             self.factor.eta = eta_factor
             self.factor.lam = lambda_factor
-
         return eta_factor, lambda_factor
 
     def compute_messages(self, eta_damping, fixed_lam=False):

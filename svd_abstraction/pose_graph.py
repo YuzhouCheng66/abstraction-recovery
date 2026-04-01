@@ -67,6 +67,89 @@ def make_slam_like_graph(
     return nodes, edges
 
 
+def make_grid_pose_graph(
+    nx=16,
+    ny=16,
+    spacing=1.0,
+    prior_prop=0.0,
+    shortcut_prob=0.0,
+    shortcut_min_sep=4,
+    seed=None,
+):
+    rng = np.random.default_rng(seed)
+    nx = int(nx)
+    ny = int(ny)
+
+    if nx <= 0 or ny <= 0:
+        raise ValueError("nx and ny must be positive")
+
+    nodes = []
+    edges = []
+
+    def node_id(ix, iy):
+        return iy * nx + ix
+
+    for iy in range(ny):
+        for ix in range(nx):
+            node_idx = node_id(ix, iy)
+            nodes.append(
+                {
+                    "data": {"id": f"{node_idx}", "layer": 0, "dim": 2, "num_base": 1},
+                    "position": {
+                        "x": float(ix * spacing),
+                        "y": float(iy * spacing),
+                    },
+                }
+            )
+
+    for iy in range(ny):
+        for ix in range(nx):
+            src = node_id(ix, iy)
+            if ix + 1 < nx:
+                edges.append({"data": {"source": f"{src}", "target": f"{node_id(ix + 1, iy)}"}})
+            if iy + 1 < ny:
+                edges.append({"data": {"source": f"{src}", "target": f"{node_id(ix, iy + 1)}"}})
+
+    if shortcut_prob > 0.0:
+        existing = {
+            (min(int(edge["data"]["source"]), int(edge["data"]["target"])),
+             max(int(edge["data"]["source"]), int(edge["data"]["target"])))
+            for edge in edges
+        }
+        for iy0 in range(ny):
+            for ix0 in range(nx):
+                src = node_id(ix0, iy0)
+                for iy1 in range(iy0, ny):
+                    for ix1 in range(nx):
+                        dst = node_id(ix1, iy1)
+                        if dst <= src:
+                            continue
+                        manhattan = abs(ix1 - ix0) + abs(iy1 - iy0)
+                        if manhattan < shortcut_min_sep:
+                            continue
+                        key = (src, dst)
+                        if key in existing:
+                            continue
+                        if rng.random() < float(shortcut_prob):
+                            edges.append({"data": {"source": f"{src}", "target": f"{dst}"}})
+                            existing.add(key)
+
+    total_nodes = nx * ny
+    if prior_prop <= 0.0:
+        strong_ids = set()
+    elif prior_prop >= 1.0:
+        strong_ids = set(range(total_nodes))
+    else:
+        k = max(1, int(np.floor(prior_prop * total_nodes)))
+        strong_ids = set(rng.choice(total_nodes, size=k, replace=False).tolist())
+
+    for node_idx in strong_ids:
+        edges.append({"data": {"source": f"{node_idx}", "target": "prior"}})
+    edges.append({"data": {"source": "0", "target": "anchor"}})
+
+    return nodes, edges
+
+
 def build_noisy_pose_graph(
     nodes,
     edges,

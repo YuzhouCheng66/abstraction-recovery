@@ -46,8 +46,10 @@ def run_vcycle_until_converged(
     group_size,
     r_reduced,
     basis_source,
+    eta_assignment_mode,
     warmup,
     num_levels,
+    top_level_solver,
 ):
     hierarchy = SVDResidualHierarchy(
         base_graph=graph,
@@ -57,6 +59,7 @@ def run_vcycle_until_converged(
         r_reduced=r_reduced,
         basis_source=basis_source,
         freeze_basis=True,
+        eta_assignment_mode=eta_assignment_mode,
     )
 
     # Align the actual V-cycle schedule with the raylib AMG comparison:
@@ -77,6 +80,7 @@ def run_vcycle_until_converged(
 
     history = []
     last_stats = None
+    direct_solves = 0
     for cycle in range(1, max_cycles + 1):
         last_stats = hierarchy.v_cycle(
             pre_smooth=pre_smooth,
@@ -84,16 +88,22 @@ def run_vcycle_until_converged(
             upward_coarse_sweeps=upward_coarse_sweeps,
             downward_coarse_sweeps=downward_coarse_sweeps,
             scheduler="sync",
+            top_level_solver=top_level_solver,
         )
         base_sweeps += pre_smooth + post_smooth
-        total_sweeps += pre_smooth + post_smooth + (actual_levels - 1) * (
+        coarse_levels = max(actual_levels - 1, 0)
+        iterative_coarse_levels = coarse_levels
+        if top_level_solver == "direct" and coarse_levels > 0:
+            iterative_coarse_levels -= 1
+            direct_solves += 1
+        total_sweeps += pre_smooth + post_smooth + iterative_coarse_levels * (
             upward_coarse_sweeps + downward_coarse_sweeps
         )
         err = relative_error(graph, x_star)
         history.append(err)
         if err < tol:
-            return cycle, actual_levels, base_sweeps, total_sweeps, err, history, last_stats
-    return max_cycles, actual_levels, base_sweeps, total_sweeps, history[-1], history, last_stats
+            return cycle, actual_levels, base_sweeps, total_sweeps, direct_solves, err, history, last_stats
+    return max_cycles, actual_levels, base_sweeps, total_sweeps, direct_solves, history[-1], history, last_stats
 
 
 def main():
@@ -108,8 +118,15 @@ def main():
     parser.add_argument("--group-size", type=int, default=5)
     parser.add_argument("--r-reduced", type=int, default=2)
     parser.add_argument("--basis-source", type=str, default="belief_covariance")
+    parser.add_argument(
+        "--eta-assignment-mode",
+        type=str,
+        default="all_in_prior",
+        choices=["all_in_prior", "projected_terms"],
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--num-levels", type=int, default=2)
+    parser.add_argument("--top-level-solver", type=str, default="iterative", choices=["iterative", "direct"])
     parser.add_argument("--tol", type=float, default=1e-6)
     parser.add_argument("--max-base-iters", type=int, default=2000)
     parser.add_argument("--max-v-cycles", type=int, default=500)
@@ -158,7 +175,7 @@ def main():
         tol=args.tol,
         max_iters=args.max_base_iters,
     )
-    v_cycles, actual_levels, v_base_sweeps, v_total_sweeps, v_err, _, v_stats = run_vcycle_until_converged(
+    v_cycles, actual_levels, v_base_sweeps, v_total_sweeps, v_direct_solves, v_err, _, v_stats = run_vcycle_until_converged(
         vcycle_graph,
         nodes,
         x_star,
@@ -167,8 +184,10 @@ def main():
         group_size=args.group_size,
         r_reduced=args.r_reduced,
         basis_source=args.basis_source,
+        eta_assignment_mode=args.eta_assignment_mode,
         warmup=args.warmup,
         num_levels=args.num_levels,
+        top_level_solver=args.top_level_solver,
     )
 
     base_final = mean_vector(base_graph)
@@ -177,14 +196,20 @@ def main():
     print(f"Toy example: linear pose graph with {len(nodes)} variables and {len(edges)} factors")
     print(
         f"Basis source: {args.basis_source}; group_size={args.group_size}; "
-        f"r={args.r_reduced}; warmup={args.warmup}; requested_levels={args.num_levels}; actual_levels={actual_levels}"
+        f"r={args.r_reduced}; eta_assignment={args.eta_assignment_mode}; "
+        f"warmup={args.warmup}; requested_levels={args.num_levels}; "
+        f"actual_levels={actual_levels}; top_level_solver={args.top_level_solver}"
     )
     print(f"Base GBP converged in {base_iters} synchronous sweeps; final relative error to exact solve = {base_err:.6e}")
-    print(
+    vcycle_line = (
         "V-cycle converged in "
         f"{v_cycles} cycles / {v_base_sweeps} base smoothing sweeps / "
-        f"{v_total_sweeps} total sweeps; final relative error to exact solve = {v_err:.6e}"
+        f"{v_total_sweeps} total iterative sweeps"
     )
+    if v_direct_solves > 0:
+        vcycle_line += f" / {v_direct_solves} top direct solves"
+    vcycle_line += f"; final relative error to exact solve = {v_err:.6e}"
+    print(vcycle_line)
     print(f"Distance between converged base and V-cycle means = {np.linalg.norm(base_final - vcycle_final):.6e}")
     if v_stats is not None:
         print(f"Last V-cycle residual before/after = {v_stats.residual_norm_before:.6e} -> {v_stats.residual_norm_after:.6e}")

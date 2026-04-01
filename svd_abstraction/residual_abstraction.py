@@ -34,6 +34,7 @@ class SVDResidualAbstraction:
         basis_source="belief_covariance",
         freeze_basis=True,
         ridge=1e-10,
+        eta_assignment_mode="all_in_prior",
     ):
         self.base_graph = base_graph
         self.groups = [list(group) for group in groups]
@@ -41,6 +42,9 @@ class SVDResidualAbstraction:
         self.basis_source = basis_source
         self.freeze_basis = freeze_basis
         self.ridge = ridge
+        if eta_assignment_mode not in {"all_in_prior", "projected_terms"}:
+            raise ValueError(f"Unknown eta_assignment_mode: {eta_assignment_mode}")
+        self.eta_assignment_mode = eta_assignment_mode
 
         self.var_slices = self._build_var_slices()
         self.groups = self._normalize_groups(self.groups)
@@ -56,6 +60,22 @@ class SVDResidualAbstraction:
         self.bases_initialized = False
         self.coarse_graph = None
         self.coarse_var_nodes = []
+        self._coarse_prior_eta_terms = []
+        self._coarse_factor_eta_terms = []
+
+    @staticmethod
+    def _set_graph_mean(graph, mean_vector):
+        offset = 0
+        for var in graph.var_nodes[: graph.n_var_nodes]:
+            local_mean = np.asarray(mean_vector[offset : offset + var.dofs]).reshape(-1)
+            offset += var.dofs
+            var.mu = local_mean.copy()
+            var.belief.eta = var.belief.lam @ var.mu
+
+            for factor in var.adj_factors:
+                belief_ix = factor.adj_var_nodes.index(var)
+                factor.adj_beliefs[belief_ix].eta = var.belief.eta
+                factor.adj_beliefs[belief_ix].lam = var.belief.lam
 
     def _build_var_slices(self):
         var_slices = {}
@@ -169,6 +189,18 @@ class SVDResidualAbstraction:
         factor.factor.lam = 0.5 * (lam + lam.T)
         return factor
 
+    @staticmethod
+    def _factor_state_vector(factor):
+        return np.concatenate([np.asarray(var.mu).reshape(-1) for var in factor.adj_var_nodes])
+
+    def _reset_coarse_eta(self):
+        for coarse_var in self.coarse_var_nodes:
+            coarse_var.prior.eta = np.zeros_like(coarse_var.prior.eta)
+        if self.coarse_graph is None:
+            return
+        for coarse_factor in self.coarse_graph.factors[: self.coarse_graph.n_factor_nodes]:
+            coarse_factor.factor.eta = np.zeros_like(coarse_factor.factor.eta)
+
     def initialize_bases(self, force=False):
         if self.bases_initialized and self.freeze_basis and not force:
             return
@@ -205,6 +237,8 @@ class SVDResidualAbstraction:
         self._refresh_group_maps()
         self.coarse_graph = None
         self.coarse_var_nodes = []
+        self._coarse_prior_eta_terms = []
+        self._coarse_factor_eta_terms = []
 
     def joint_system(self):
         eta, lam = self.base_graph.joint_distribution_inf()
@@ -231,6 +265,8 @@ class SVDResidualAbstraction:
 
         coarse_graph = FactorGraph(nonlinear_factors=False, eta_damping=self.base_graph.eta_damping)
         coarse_var_nodes = []
+        coarse_prior_eta_terms = []
+        coarse_factor_eta_terms = []
 
         for group_idx, reduced_slice in enumerate(self.group_reduced_slices):
             dim = reduced_slice.stop - reduced_slice.start
@@ -254,6 +290,13 @@ class SVDResidualAbstraction:
             coarse_var_nodes[group_idx].adj_factors.append(factor)
             coarse_graph.factors.append(factor)
             factor_id += 1
+            coarse_prior_eta_terms.append(
+                {
+                    "group_idx": group_idx,
+                    "projection": proj_rows.copy(),
+                    "source": ("var_prior", var),
+                }
+            )
 
         for factor in self.base_graph.factors[: self.base_graph.n_factor_nodes]:
             adj_vars = factor.adj_var_nodes
@@ -267,6 +310,13 @@ class SVDResidualAbstraction:
                 coarse_var_nodes[group_idx].adj_factors.append(coarse_factor)
                 coarse_graph.factors.append(coarse_factor)
                 factor_id += 1
+                coarse_prior_eta_terms.append(
+                    {
+                        "group_idx": group_idx,
+                        "projection": proj_rows.copy(),
+                        "source": ("factor", factor),
+                    }
+                )
                 continue
 
             if len(adj_vars) != 2:
@@ -285,6 +335,13 @@ class SVDResidualAbstraction:
                 coarse_var_nodes[group_i].adj_factors.append(coarse_factor)
                 coarse_graph.factors.append(coarse_factor)
                 factor_id += 1
+                coarse_prior_eta_terms.append(
+                    {
+                        "group_idx": group_i,
+                        "projection": proj.copy(),
+                        "source": ("factor", factor),
+                    }
+                )
                 continue
 
             dim_i = proj_i.shape[1]
@@ -305,6 +362,13 @@ class SVDResidualAbstraction:
             coarse_var_nodes[group_j].adj_factors.append(coarse_factor)
             coarse_graph.factors.append(coarse_factor)
             factor_id += 1
+            coarse_factor_eta_terms.append(
+                {
+                    "coarse_factor": coarse_factor,
+                    "projection": proj.copy(),
+                    "source_factor": factor,
+                }
+            )
 
         coarse_graph.n_factor_nodes = len(coarse_graph.factors)
         for coarse_var in coarse_graph.var_nodes[: coarse_graph.n_var_nodes]:
@@ -312,19 +376,54 @@ class SVDResidualAbstraction:
 
         self.coarse_graph = coarse_graph
         self.coarse_var_nodes = coarse_var_nodes
+        self._coarse_prior_eta_terms = coarse_prior_eta_terms
+        self._coarse_factor_eta_terms = coarse_factor_eta_terms
 
-    def update_coarse_residual_eta(self):
-        if self.coarse_graph is None:
-            self.build_coarse_graph()
-
+    def _assign_coarse_eta_all_in_prior(self):
         _, _, _, residual = self.joint_system()
         coarse_residual = self.P.T @ residual
+        self._reset_coarse_eta()
 
         for group_idx, coarse_var in enumerate(self.coarse_var_nodes):
             reduced_slice = self.group_reduced_slices[group_idx]
             coarse_var.prior.eta = coarse_residual[reduced_slice].copy()
-
         return coarse_residual
+
+    def _assign_coarse_eta_projected_terms(self):
+        self._reset_coarse_eta()
+
+        for term in self._coarse_prior_eta_terms:
+            group_idx = term["group_idx"]
+            proj = term["projection"]
+            source_kind, source_obj = term["source"]
+            if source_kind == "var_prior":
+                local_residual = source_obj.prior.eta - source_obj.prior.lam @ np.asarray(source_obj.mu).reshape(-1)
+            elif source_kind == "factor":
+                x = self._factor_state_vector(source_obj)
+                local_residual = source_obj.factor.eta - source_obj.factor.lam @ x
+            else:
+                raise ValueError(f"Unknown coarse prior eta source: {source_kind}")
+            self.coarse_var_nodes[group_idx].prior.eta += proj.T @ local_residual
+
+        for term in self._coarse_factor_eta_terms:
+            coarse_factor = term["coarse_factor"]
+            proj = term["projection"]
+            source_factor = term["source_factor"]
+            x = self._factor_state_vector(source_factor)
+            local_residual = source_factor.factor.eta - source_factor.factor.lam @ x
+            coarse_factor.factor.eta = proj.T @ local_residual
+
+        coarse_eta, _ = self.coarse_graph.joint_distribution_inf()
+        return coarse_eta
+
+    def update_coarse_residual_eta(self):
+        if self.coarse_graph is None:
+            self.build_coarse_graph()
+        if self.eta_assignment_mode == "all_in_prior":
+            return self._assign_coarse_eta_all_in_prior()
+        if self.eta_assignment_mode == "projected_terms":
+            return self._assign_coarse_eta_projected_terms()
+        raise ValueError(f"Unknown eta_assignment_mode: {self.eta_assignment_mode}")
 
     def coarse_mean_vector(self):
         if self.coarse_graph is None:
@@ -344,6 +443,24 @@ class SVDResidualAbstraction:
         except np.linalg.LinAlgError:
             delta_z = np.linalg.solve(stabilized, coarse_residual)
         return delta_z, coarse_lam, coarse_residual
+
+    def direct_solve_coarse_graph(self):
+        if self.coarse_graph is None:
+            self.build_coarse_graph()
+
+        eta, lam = self.coarse_graph.joint_distribution_inf()
+        if lam.size == 0:
+            delta_z = np.zeros(0, dtype=float)
+        else:
+            stabilized = 0.5 * (lam + lam.T) + self.ridge * np.eye(lam.shape[0], dtype=float)
+            try:
+                chol, lower = scipy.linalg.cho_factor(stabilized, lower=False, check_finite=False)
+                delta_z = scipy.linalg.cho_solve((chol, lower), eta)
+            except np.linalg.LinAlgError:
+                delta_z = np.linalg.solve(stabilized, eta)
+
+        self._set_graph_mean(self.coarse_graph, delta_z)
+        return delta_z
 
     def prolongate(self, delta_z):
         if not self.bases_initialized:
@@ -373,7 +490,11 @@ class SVDResidualAbstraction:
         fixed_lam=False,
         step_size=1.0,
         recompute_basis=False,
+        top_level_solver="iterative",
     ):
+        if top_level_solver not in {"iterative", "direct"}:
+            raise ValueError(f"Unknown top_level_solver: {top_level_solver}")
+
         if pre_smooth > 0:
             self.warmup(iterations=pre_smooth, scheduler=scheduler, fixed_lam=fixed_lam)
 
@@ -391,23 +512,26 @@ class SVDResidualAbstraction:
         coarse_residual = self.update_coarse_residual_eta()
         self.coarse_graph.update_all_beliefs()
 
-        for _ in range(upward_coarse_sweeps):
-            if scheduler == "sync":
-                self.coarse_graph.synchronous_iteration()
-            elif scheduler == "residual":
-                self.coarse_graph.residual_iteration_var_heap(max_updates=self.coarse_graph.n_var_nodes)
-            else:
-                raise ValueError(f"Unknown scheduler: {scheduler}")
+        if top_level_solver == "direct":
+            delta_z = self.direct_solve_coarse_graph()
+        else:
+            for _ in range(upward_coarse_sweeps):
+                if scheduler == "sync":
+                    self.coarse_graph.synchronous_iteration()
+                elif scheduler == "residual":
+                    self.coarse_graph.residual_iteration_var_heap(max_updates=self.coarse_graph.n_var_nodes)
+                else:
+                    raise ValueError(f"Unknown scheduler: {scheduler}")
 
-        for _ in range(downward_coarse_sweeps):
-            if scheduler == "sync":
-                self.coarse_graph.synchronous_iteration()
-            elif scheduler == "residual":
-                self.coarse_graph.residual_iteration_var_heap(max_updates=self.coarse_graph.n_var_nodes)
-            else:
-                raise ValueError(f"Unknown scheduler: {scheduler}")
+            for _ in range(downward_coarse_sweeps):
+                if scheduler == "sync":
+                    self.coarse_graph.synchronous_iteration()
+                elif scheduler == "residual":
+                    self.coarse_graph.residual_iteration_var_heap(max_updates=self.coarse_graph.n_var_nodes)
+                else:
+                    raise ValueError(f"Unknown scheduler: {scheduler}")
 
-        delta_z = self.coarse_mean_vector()
+            delta_z = self.coarse_mean_vector()
         delta_x = self.prolongate(delta_z)
         self.apply_correction(delta_x, step_size=step_size)
 
@@ -453,6 +577,7 @@ class SVDResidualHierarchy:
         basis_source="belief_covariance",
         freeze_basis=True,
         ridge=1e-10,
+        eta_assignment_mode="all_in_prior",
     ):
         self.group_size = group_size
         self.num_levels = max(2, int(num_levels))
@@ -460,6 +585,7 @@ class SVDResidualHierarchy:
         self.basis_source = basis_source
         self.freeze_basis = freeze_basis
         self.ridge = ridge
+        self.eta_assignment_mode = eta_assignment_mode
 
         self.levels = [
             SVDResidualAbstraction(
@@ -469,6 +595,7 @@ class SVDResidualHierarchy:
                 basis_source=basis_source,
                 freeze_basis=freeze_basis,
                 ridge=ridge,
+                eta_assignment_mode=eta_assignment_mode,
             )
         ]
 
@@ -505,6 +632,7 @@ class SVDResidualHierarchy:
                     basis_source=self.basis_source,
                     freeze_basis=self.freeze_basis,
                     ridge=self.ridge,
+                    eta_assignment_mode=self.eta_assignment_mode,
                 )
             )
 
@@ -521,7 +649,11 @@ class SVDResidualHierarchy:
         fixed_lam=False,
         step_size=1.0,
         recompute_basis=False,
+        top_level_solver="iterative",
     ):
+        if top_level_solver not in {"iterative", "direct"}:
+            raise ValueError(f"Unknown top_level_solver: {top_level_solver}")
+
         self.build_hierarchy(force=recompute_basis)
 
         finest = self.levels[0]
@@ -531,12 +663,16 @@ class SVDResidualHierarchy:
         _, _, _, residual_before = finest.joint_system()
 
         coarse_residual_norm = 0.0
-        for level in self.levels:
+        top_level_index = len(self.levels) - 1
+        for level_index, level in enumerate(self.levels):
             level.initialize_bases(force=recompute_basis)
             level.build_coarse_graph(force=recompute_basis)
             coarse_residual = level.update_coarse_residual_eta()
             coarse_residual_norm = float(np.linalg.norm(coarse_residual))
             level.coarse_graph.update_all_beliefs()
+
+            if level_index == top_level_index and top_level_solver == "direct":
+                continue
 
             for _ in range(upward_coarse_sweeps):
                 if scheduler == "sync":
@@ -547,16 +683,20 @@ class SVDResidualHierarchy:
                     raise ValueError(f"Unknown scheduler: {scheduler}")
 
         correction_norm = 0.0
-        for level in reversed(self.levels):
-            for _ in range(downward_coarse_sweeps):
-                if scheduler == "sync":
-                    level.coarse_graph.synchronous_iteration()
-                elif scheduler == "residual":
-                    level.coarse_graph.residual_iteration_var_heap(max_updates=level.coarse_graph.n_var_nodes)
-                else:
-                    raise ValueError(f"Unknown scheduler: {scheduler}")
+        for reverse_index, level in enumerate(reversed(self.levels)):
+            is_top_level = reverse_index == 0
+            if is_top_level and top_level_solver == "direct":
+                delta_z = level.direct_solve_coarse_graph()
+            else:
+                for _ in range(downward_coarse_sweeps):
+                    if scheduler == "sync":
+                        level.coarse_graph.synchronous_iteration()
+                    elif scheduler == "residual":
+                        level.coarse_graph.residual_iteration_var_heap(max_updates=level.coarse_graph.n_var_nodes)
+                    else:
+                        raise ValueError(f"Unknown scheduler: {scheduler}")
 
-            delta_z = level.coarse_mean_vector()
+                delta_z = level.coarse_mean_vector()
             delta_x = level.prolongate(delta_z)
             correction_norm += float(np.linalg.norm(delta_x))
             level.apply_correction(delta_x, step_size=step_size)
