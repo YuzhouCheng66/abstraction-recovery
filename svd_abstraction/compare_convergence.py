@@ -60,6 +60,7 @@ def run_vcycle_until_converged(
         basis_source=basis_source,
         freeze_basis=True,
         eta_assignment_mode=eta_assignment_mode,
+        absolute_system=True,
     )
 
     # Align the actual V-cycle schedule with the raylib AMG comparison:
@@ -150,7 +151,7 @@ def main():
         tiny_prior=1e-12,
         seed=args.seed,
     )
-    x_star, _ = exact_graph.joint_distribution_cov()
+    x_star, _ = exact_graph.joint_distribution_cov_absolute()
 
     base_graph = build_noisy_pose_graph(
         nodes,

@@ -36,6 +36,7 @@ def main():
         r_reduced=2,
         basis_source="belief_covariance",
         freeze_basis=True,
+        absolute_system=True,
     )
 
     abstraction.warmup(iterations=5, scheduler="sync")

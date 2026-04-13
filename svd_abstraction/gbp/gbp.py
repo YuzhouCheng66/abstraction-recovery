@@ -120,7 +120,7 @@ class FactorGraph:
         self.var_residual[var] = residual
         heapq.heappush(self.var_heap, (-residual, var.variableID, var))
 
-    def residual_iteration_var_heap(self, max_updates=50):
+    def residual_iteration_var_heap(self, max_updates=50, fixed_lam=False):
         """
         Variable-priority GBP scheduler.
 
@@ -131,8 +131,9 @@ class FactorGraph:
 
         if len(self.var_heap) == 0:
             for var in self.var_nodes[: self.n_var_nodes]:
-                self.var_residual[var] = 0.0
-                heapq.heappush(self.var_heap, (-0.0, var.variableID, var))
+                residual = float(np.linalg.norm(var.compute_residual()))
+                self.var_residual[var] = residual
+                heapq.heappush(self.var_heap, (-residual, var.variableID, var))
 
         n_updates = 0
         while self.var_heap and n_updates < max_updates:
@@ -143,20 +144,18 @@ class FactorGraph:
             if abs(residual - current_residual) > 1e-12:
                 continue
 
+            touched_vars = {var}
             for factor in var.adj_factors:
-                factor.compute_messages(self.eta_damping)
+                factor.compute_messages(self.eta_damping, fixed_lam=fixed_lam)
                 for other_var in factor.adj_var_nodes:
-                    old_eta = np.array(other_var.belief.eta, copy=True)
                     other_var.update_belief()
-                    new_eta = np.array(other_var.belief.eta, copy=True)
+                    touched_vars.add(other_var)
 
-                    est_residual = float(np.linalg.norm(new_eta - old_eta))
-                    old_residual = self.var_residual.get(other_var, 0.0)
-                    if est_residual > old_residual + 1e-12:
-                        self.var_residual[other_var] = est_residual
-                        heapq.heappush(self.var_heap, (-est_residual, other_var.variableID, other_var))
+            for touched_var in touched_vars:
+                est_residual = float(np.linalg.norm(touched_var.compute_residual()))
+                self.var_residual[touched_var] = est_residual
+                heapq.heappush(self.var_heap, (-est_residual, touched_var.variableID, touched_var))
 
-            self.var_residual[var] = 0.0
             n_updates += 1
 
     def joint_distribution_inf(self):
@@ -207,8 +206,63 @@ class FactorGraph:
 
         return eta, lam
 
+    def joint_distribution_inf_absolute(self):
+        sizes = [var.dofs for var in self.var_nodes[: self.n_var_nodes]]
+        total = sum(sizes)
+
+        eta = np.empty(total, dtype=float)
+        lam = np.zeros((total, total), dtype=float)
+        var_ix = np.empty(self.n_var_nodes, dtype=int)
+
+        offset = 0
+        for var in self.var_nodes[: self.n_var_nodes]:
+            dofs = var.dofs
+            var_ix[var.variableID] = offset
+            eta[offset : offset + dofs] = var.prior.eta
+            lam[offset : offset + dofs, offset : offset + dofs] = var.prior.lam
+            offset += dofs
+
+        for factor in self.factors[: self.n_factor_nodes]:
+            factor_eta, factor_lam = factor.compute_factor_absolute(update_self=False)
+            factor_offset = 0
+            for adj_var in factor.adj_var_nodes:
+                v_id = adj_var.variableID
+                dofs = adj_var.dofs
+                start = var_ix[v_id]
+                stop = start + dofs
+
+                eta[start:stop] += factor_eta[factor_offset : factor_offset + dofs]
+                lam[start:stop, start:stop] += factor_lam[
+                    factor_offset : factor_offset + dofs,
+                    factor_offset : factor_offset + dofs,
+                ]
+
+                other_offset = 0
+                for other_adj_var in factor.adj_var_nodes:
+                    if other_adj_var.variableID > adj_var.variableID:
+                        other_start = var_ix[other_adj_var.variableID]
+                        other_stop = other_start + other_adj_var.dofs
+                        lam[start:stop, other_start:other_stop] += factor_lam[
+                            factor_offset : factor_offset + dofs,
+                            other_offset : other_offset + other_adj_var.dofs,
+                        ]
+                        lam[other_start:other_stop, start:stop] += factor_lam[
+                            other_offset : other_offset + other_adj_var.dofs,
+                            factor_offset : factor_offset + dofs,
+                        ]
+                    other_offset += other_adj_var.dofs
+                factor_offset += dofs
+
+        return eta, lam
+
     def joint_distribution_cov(self):
         eta, lam = self.joint_distribution_inf()
+        sigma = np.linalg.inv(lam)
+        mu = sigma @ eta
+        return mu, sigma
+
+    def joint_distribution_cov_absolute(self):
+        eta, lam = self.joint_distribution_inf_absolute()
         sigma = np.linalg.inv(lam)
         mu = sigma @ eta
         return mu, sigma
@@ -224,18 +278,38 @@ class VariableNode:
         self.active = True
 
         self.mu = np.zeros(dofs)
-        self.Sigma = np.eye(dofs) * 1e12
+        self._Sigma = np.eye(dofs) * 1e12
+        self._sigma_valid = True
         self.residual = np.zeros(dofs)
         self.belief = NdimGaussian(dofs)
         self.prior = NdimGaussian(dofs)
         self.dofs = dofs
+
+    @property
+    def Sigma(self):
+        if not self._sigma_valid:
+            lam = self.belief.lam
+            try:
+                chol, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
+                self._Sigma = scipy.linalg.cho_solve(
+                    (chol, lower), np.eye(self.dofs), check_finite=False
+                )
+            except np.linalg.LinAlgError:
+                self._Sigma = np.linalg.inv(lam)
+            self._sigma_valid = True
+        return self._Sigma
+
+    @Sigma.setter
+    def Sigma(self, value):
+        self._Sigma = np.asarray(value, dtype=float)
+        self._sigma_valid = True
 
     def update_belief(self):
         eta = self.prior.eta.copy()
         lam = self.prior.lam.copy()
 
         for factor in self.adj_factors:
-            message_ix = factor.adj_var_nodes.index(self)
+            message_ix = factor.var_index[self.variableID]
             eta += factor.messages[message_ix].eta
             lam += factor.messages[message_ix].lam
 
@@ -243,15 +317,16 @@ class VariableNode:
         self.belief.lam = lam
 
         try:
-            chol, lower = scipy.linalg.cho_factor(lam, lower=False, check_finite=False)
-            self.mu = scipy.linalg.cho_solve((chol, lower), eta)
-            self.Sigma = scipy.linalg.cho_solve((chol, lower), np.eye(self.dofs))
+            chol, lower = scipy.linalg.cho_factor(
+                lam, lower=False, check_finite=False, overwrite_a=True
+            )
+            self.mu = scipy.linalg.cho_solve((chol, lower), eta, check_finite=False)
         except np.linalg.LinAlgError:
             self.mu = np.linalg.solve(lam, eta)
-            self.Sigma = np.linalg.inv(lam)
+        self._sigma_valid = False
 
         for factor in self.adj_factors:
-            belief_ix = factor.adj_var_nodes.index(self)
+            belief_ix = factor.var_index[self.variableID]
             factor.adj_beliefs[belief_ix].eta = self.belief.eta
             factor.adj_beliefs[belief_ix].lam = self.belief.lam
 
@@ -292,6 +367,7 @@ class Factor:
         self.factorID = factor_id
         self.adj_var_nodes = adj_var_nodes
         self.adj_vIDs = []
+        self.var_index = {}
         self.adj_beliefs = []
         self.messages = []
         self.messages_prior = []
@@ -306,6 +382,7 @@ class Factor:
         for var in self.adj_var_nodes:
             self.dofs_conditional_vars += var.dofs
             self.adj_vIDs.append(var.variableID)
+            self.var_index[var.variableID] = len(self.adj_vIDs) - 1
             self.adj_beliefs.append(NdimGaussian(var.dofs))
             self.messages.append(NdimGaussian(var.dofs))
             self.messages_prior.append(NdimGaussian(var.dofs))
@@ -357,6 +434,27 @@ class Factor:
             self.factor.lam = lambda_factor
         return eta_factor, lambda_factor
 
+    def compute_factor_absolute(self, linpoint=None, update_self=False):
+        if linpoint is None:
+            linpoint = self.linpoint.copy()
+        else:
+            linpoint = np.asarray(linpoint).reshape(-1)
+
+        J = self.jac_fn(linpoint, *self.args)
+        pred_measurement = self.meas_fn(linpoint, *self.args)
+
+        lambda_factor = np.zeros_like(self.factor.lam)
+        eta_factor = np.zeros_like(self.factor.eta)
+
+        for jac_block, lam_z, meas, pred in zip(J, self.measurement_lambda, self.measurement, pred_measurement):
+            lambda_factor += jac_block.T @ lam_z @ jac_block
+            eta_factor += jac_block.T @ (lam_z @ ((jac_block @ linpoint) + meas - pred))
+
+        if update_self:
+            self.factor.eta = eta_factor
+            self.factor.lam = lambda_factor
+        return eta_factor, lambda_factor
+
     def compute_messages(self, eta_damping, fixed_lam=False):
         if len(self.adj_vIDs) == 1:
             self.messages[0].eta = self.factor.eta.copy()
@@ -371,40 +469,45 @@ class Factor:
         messages_lam = []
         split = self.adj_var_nodes[0].dofs
 
+        eta0 = self.factor.eta[:split]
+        eta1 = self.factor.eta[split:]
+        lam00 = self.factor.lam[:split, :split]
+        lam01 = self.factor.lam[:split, split:]
+        lam10 = self.factor.lam[split:, :split]
+        lam11 = self.factor.lam[split:, split:]
+
+        cavity_eta_0 = self.adj_beliefs[0].eta - self.messages[0].eta
+        cavity_eta_1 = self.adj_beliefs[1].eta - self.messages[1].eta
+        cavity_lam_0 = self.adj_beliefs[0].lam - self.messages[0].lam
+        cavity_lam_1 = self.adj_beliefs[1].lam - self.messages[1].lam
+
         for target_idx in range(2):
-            eta_factor = self.factor.eta.copy()
-            lam_factor = self.factor.lam.copy()
-
-            offset = 0
-            for other_idx, other_var in enumerate(self.adj_var_nodes):
-                dofs = other_var.dofs
-                if other_idx != target_idx:
-                    eta_factor[offset : offset + dofs] += self.adj_beliefs[other_idx].eta - self.messages[other_idx].eta
-                    lam_factor[offset : offset + dofs, offset : offset + dofs] += (
-                        self.adj_beliefs[other_idx].lam - self.messages[other_idx].lam
-                    )
-                offset += dofs
-
             if target_idx == 0:
-                eta_o = eta_factor[:split]
-                eta_no = eta_factor[split:]
-                lam_oo = lam_factor[:split, :split]
-                lam_ono = lam_factor[:split, split:]
-                lam_noo = lam_factor[split:, :split]
-                lam_nono = lam_factor[split:, split:]
+                eta_o = eta0
+                eta_no = eta1 + cavity_eta_1
+                lam_oo = lam00
+                lam_ono = lam01
+                lam_noo = lam10
+                lam_nono = lam11 + cavity_lam_1
             else:
-                eta_o = eta_factor[split:]
-                eta_no = eta_factor[:split]
-                lam_oo = lam_factor[split:, split:]
-                lam_ono = lam_factor[split:, :split]
-                lam_noo = lam_factor[:split, split:]
-                lam_nono = lam_factor[:split, :split]
+                eta_o = eta1
+                eta_no = eta0 + cavity_eta_0
+                lam_oo = lam11
+                lam_ono = lam10
+                lam_noo = lam01
+                lam_nono = lam00 + cavity_lam_0
 
-            lam_nono = lam_nono + 1e-10 * np.eye(lam_nono.shape[0])
+            lam_nono = lam_nono.copy()
+            lam_nono.flat[:: lam_nono.shape[0] + 1] += 1e-10
             rhs = np.concatenate([lam_noo, eta_no.reshape(-1, 1)], axis=1)
             try:
-                chol, lower = scipy.linalg.cho_factor(lam_nono, lower=False, check_finite=False)
-                solved = scipy.linalg.cho_solve((chol, lower), rhs)
+                chol, lower = scipy.linalg.cho_factor(
+                    lam_nono,
+                    lower=False,
+                    check_finite=False,
+                    overwrite_a=True,
+                )
+                solved = scipy.linalg.cho_solve((chol, lower), rhs, check_finite=False)
             except np.linalg.LinAlgError:
                 solved = np.linalg.solve(lam_nono, rhs)
 

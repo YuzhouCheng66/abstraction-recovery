@@ -201,9 +201,16 @@ def build_chain_graph(n=128, prior_sigma=1.0, odom_sigma=1.0, seed=0):
     )
 
 
-def build_hierarchy(graph, split_mode="pmis2", interp_mode="extended_if_needed", theta=0.25):
+def build_hierarchy(
+    graph,
+    split_mode="pmis2",
+    interp_mode="extended_if_needed",
+    theta=0.25,
+    edge_mode="relative",
+):
     graph.enable_second_pass_coarse_match = False
     graph.multigrid_split_mode = split_mode
+    graph.multigrid_coarse_edge_mode = edge_mode
     for var in graph.multigrid_vars[0]:
         var.multigrid.theta = theta
         var.multigrid.interp_mode = interp_mode

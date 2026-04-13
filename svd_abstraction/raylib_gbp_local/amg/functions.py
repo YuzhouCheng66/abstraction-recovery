@@ -359,6 +359,11 @@ def coarsen_graph(graph, vars):
 
     # A_coarse_full = R_full @ A_full @ I_full
 
+    edge_mode = getattr(graph, "multigrid_coarse_edge_mode", "relative")
+    valid_edge_modes = {"relative", "matrix_cross_term"}
+    if edge_mode not in valid_edge_modes:
+        raise ValueError(f"Unknown multigrid coarse edge mode: {edge_mode}")
+
     for ci_idx, ci_var in enumerate(high_level_vars_to_update):
         ci_var.prior.lam = A_coarse[ci_idx*dof:ci_idx*dof+dof,ci_idx*dof:ci_idx*dof+dof].toarray()
         ci_var.prior.eta = np.zeros((dof,))
@@ -369,16 +374,33 @@ def coarsen_graph(graph, vars):
                 cj_var = high_level_vars_to_update[cj_idx]
                 factor_exists = False
                 lam_ij = A_coarse[ci_idx*dof:ci_idx*dof+dof,cj_idx*dof:cj_idx*dof+dof].toarray()
-                lam_ii = -lam_ij
-                ci_var.prior.lam -= lam_ii
+                lam_ji = A_coarse[cj_idx*dof:cj_idx*dof+dof,ci_idx*dof:ci_idx*dof+dof].toarray()
+
+                if edge_mode == "relative":
+                    lam_ii = -lam_ij
+                    factor_lam = np.concatenate(
+                        (
+                            np.concatenate((lam_ii, lam_ij), axis=1),
+                            np.concatenate((lam_ji, lam_ii), axis=1),
+                        ),
+                        axis=0,
+                    )
+                    ci_var.prior.lam -= lam_ii
+                else:
+                    zero = np.zeros_like(lam_ij)
+                    factor_lam = np.concatenate(
+                        (
+                            np.concatenate((zero, lam_ij), axis=1),
+                            np.concatenate((lam_ji, zero), axis=1),
+                        ),
+                        axis=0,
+                    )
+
                 for factor in ci_var.adj_factors:
                     if cj_var in factor.adj_var_nodes:
-                        factor.lam = np.concatenate( \
-                                            (np.concatenate((lam_ii,lam_ij),axis=1), \
-                                            np.concatenate((lam_ij,lam_ii),axis=1)) \
-                                        ,axis=0)
-                        factor.eta = np.zeros((dof*2,))
-                        factor.gauss_noise_var = -new_factor.factor.lam[:dof,dof:dof+dof]
+                        factor.factor.lam = factor_lam
+                        factor.factor.eta = np.zeros((dof*2,))
+                        factor.gauss_noise_var = -factor.factor.lam[:dof,dof:dof+dof]
                         factor_exists = True
                         break
 
@@ -391,10 +413,7 @@ def coarsen_graph(graph, vars):
                                             None,
                                             wildfire=graph.b_wild)
                     
-                    new_factor.factor.lam = np.concatenate( \
-                                            (np.concatenate((lam_ii,lam_ij),axis=1), \
-                                            np.concatenate((lam_ij,lam_ii),axis=1)) \
-                                        ,axis=0)
+                    new_factor.factor.lam = factor_lam
                     new_factor.gauss_noise_var = -new_factor.factor.lam[:dof,dof:dof+dof]
                     new_factor.factor.eta = np.zeros((dof*2,))
 

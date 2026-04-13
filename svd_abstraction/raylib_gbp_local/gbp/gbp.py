@@ -44,6 +44,7 @@ class FactorGraph:
         self.prolongation_eta_mode = "none"
         self.prolongation_eta_eps = 1e-12
         self.prolongation_eta_levels = None
+        self.multigrid_coarse_edge_mode = "relative"
         self._sequential_reverse_by_level = {}
         self._hybrid_counter_by_level = {}
 
