@@ -13,6 +13,14 @@
 
 namespace gbp {
 
+namespace {
+using SteadyClock = std::chrono::steady_clock;
+
+double elapsedSeconds(const SteadyClock::time_point& start, const SteadyClock::time_point& end) {
+    return std::chrono::duration<double>(end - start).count();
+}
+}  // namespace
+
 FactorGraph::~FactorGraph() {
     if (!locks_initialized) return;
     for (auto& lk : var_locks) omp_destroy_lock(&lk);
@@ -111,42 +119,175 @@ void FactorGraph::connect(Factor* f, VariableNode* v, int local_idx) {
 }
 
 void FactorGraph::synchronousIteration(bool /*robustify*/) {
-    // 1) factor messages (OpenMP并行)
-    
-    //#pragma omp parallel for schedule(guided)
-    omp_set_num_threads(12);
-    for (int i = 0; i < (int)factors.size(); ++i) {
-        auto& fptr = factors[i];
-        if (!fptr->active) continue;
-        fptr->computeMessages(eta_damping);
+    const bool use_parallel = !strict_compare_mode;
+    const bool profile = profile_sync_timing;
+    SteadyClock::time_point factor_t0;
+    SteadyClock::time_point factor_t1;
+    SteadyClock::time_point var_t0;
+    SteadyClock::time_point var_t1;
+
+    if (use_parallel) {
+        if (sync_num_threads > 0) {
+            if (profile) factor_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static) num_threads(sync_num_threads)
+            for (int i = 0; i < (int)factors.size(); ++i) {
+                auto& fptr = factors[i];
+                if (!fptr || !fptr->active) continue;
+                fptr->computeMessages(eta_damping);
+            }
+            if (profile) factor_t1 = SteadyClock::now();
+
+            if (profile) var_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static) num_threads(sync_num_threads)
+            for (int i = 0; i < (int)var_nodes.size(); ++i) {
+                auto& vptr = var_nodes[i];
+                if (!vptr) continue;
+                if (sync_update_means) {
+                    vptr->updateBelief();
+                } else {
+                    vptr->updateBeliefNoMu();
+                }
+            }
+            if (profile) var_t1 = SteadyClock::now();
+        } else {
+            if (profile) factor_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)factors.size(); ++i) {
+                auto& fptr = factors[i];
+                if (!fptr || !fptr->active) continue;
+                fptr->computeMessages(eta_damping);
+            }
+            if (profile) factor_t1 = SteadyClock::now();
+
+            if (profile) var_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)var_nodes.size(); ++i) {
+                auto& vptr = var_nodes[i];
+                if (!vptr) continue;
+                if (sync_update_means) {
+                    vptr->updateBelief();
+                } else {
+                    vptr->updateBeliefNoMu();
+                }
+            }
+            if (profile) var_t1 = SteadyClock::now();
+        }
+        if (profile) {
+            sync_factor_pass_sec_accum += elapsedSeconds(factor_t0, factor_t1);
+            sync_variable_pass_sec_accum += elapsedSeconds(var_t0, var_t1);
+        }
+        return;
     }
 
-    // 2) variable beliefs (OpenMP并行)
-    //#pragma omp parallel for schedule(guided)
+    if (profile) factor_t0 = SteadyClock::now();
+    for (int i = 0; i < (int)factors.size(); ++i) {
+        auto& fptr = factors[i];
+        if (!fptr || !fptr->active) continue;
+        fptr->computeMessages(eta_damping);
+    }
+    if (profile) factor_t1 = SteadyClock::now();
+
+    if (profile) var_t0 = SteadyClock::now();
     for (int i = 0; i < (int)var_nodes.size(); ++i) {
         auto& vptr = var_nodes[i];
         if (!vptr) continue;
-        vptr->updateBelief();
+        if (sync_update_means) {
+            vptr->updateBelief();
+        } else {
+            vptr->updateBeliefNoMu();
+        }
     }
-
+    if (profile) {
+        var_t1 = SteadyClock::now();
+        sync_factor_pass_sec_accum += elapsedSeconds(factor_t0, factor_t1);
+        sync_variable_pass_sec_accum += elapsedSeconds(var_t0, var_t1);
+    }
 }
 
 void FactorGraph::synchronousIterationFixedLam(bool /*robustify*/) {
-    // 1) factor messages (OpenMP并行) 
-        //#pragma omp parallel for schedule(guided)
-        for (int i = 0; i < (int)factors.size(); ++i) {
-            auto& fptr = factors[i];
-            if (!fptr || !fptr->active) continue;
-            fptr->computeMessagesFixedLam(eta_damping);
-        }
+    const bool use_parallel = !strict_compare_mode;
+    const bool profile = profile_sync_timing;
+    SteadyClock::time_point factor_t0;
+    SteadyClock::time_point factor_t1;
+    SteadyClock::time_point var_t0;
+    SteadyClock::time_point var_t1;
 
-    // 2) variable beliefs (OpenMP并行)
-        //#pragma omp parallel for schedule(guided)
-        for (int i = 0; i < (int)var_nodes.size(); ++i) {
-            auto& vptr = var_nodes[i];
-            if (!vptr) continue;
-            vptr->updateBelief();
+    if (use_parallel) {
+        if (sync_num_threads > 0) {
+            if (profile) factor_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static) num_threads(sync_num_threads)
+            for (int i = 0; i < (int)factors.size(); ++i) {
+                auto& fptr = factors[i];
+                if (!fptr || !fptr->active) continue;
+                fptr->computeMessagesFixedLam(eta_damping);
+            }
+            if (profile) factor_t1 = SteadyClock::now();
+
+            if (profile) var_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static) num_threads(sync_num_threads)
+            for (int i = 0; i < (int)var_nodes.size(); ++i) {
+                auto& vptr = var_nodes[i];
+                if (!vptr) continue;
+                if (sync_update_means) {
+                    vptr->updateBelief();
+                } else {
+                    vptr->updateBeliefNoMu();
+                }
+            }
+            if (profile) var_t1 = SteadyClock::now();
+        } else {
+            if (profile) factor_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)factors.size(); ++i) {
+                auto& fptr = factors[i];
+                if (!fptr || !fptr->active) continue;
+                fptr->computeMessagesFixedLam(eta_damping);
+            }
+            if (profile) factor_t1 = SteadyClock::now();
+
+            if (profile) var_t0 = SteadyClock::now();
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)var_nodes.size(); ++i) {
+                auto& vptr = var_nodes[i];
+                if (!vptr) continue;
+                if (sync_update_means) {
+                    vptr->updateBelief();
+                } else {
+                    vptr->updateBeliefNoMu();
+                }
+            }
+            if (profile) var_t1 = SteadyClock::now();
         }
+        if (profile) {
+            sync_factor_pass_sec_accum += elapsedSeconds(factor_t0, factor_t1);
+            sync_variable_pass_sec_accum += elapsedSeconds(var_t0, var_t1);
+        }
+        return;
+    }
+
+    if (profile) factor_t0 = SteadyClock::now();
+    for (int i = 0; i < (int)factors.size(); ++i) {
+        auto& fptr = factors[i];
+        if (!fptr || !fptr->active) continue;
+        fptr->computeMessagesFixedLam(eta_damping);
+    }
+    if (profile) factor_t1 = SteadyClock::now();
+
+    if (profile) var_t0 = SteadyClock::now();
+    for (int i = 0; i < (int)var_nodes.size(); ++i) {
+        auto& vptr = var_nodes[i];
+        if (!vptr) continue;
+        if (sync_update_means) {
+            vptr->updateBelief();
+        } else {
+            vptr->updateBeliefNoMu();
+        }
+    }
+    if (profile) {
+        var_t1 = SteadyClock::now();
+        sync_factor_pass_sec_accum += elapsedSeconds(factor_t0, factor_t1);
+        sync_variable_pass_sec_accum += elapsedSeconds(var_t0, var_t1);
+    }
 }
 
 void FactorGraph::relinearizeAllFactors() {

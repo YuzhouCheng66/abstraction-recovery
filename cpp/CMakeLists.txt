@@ -3,34 +3,43 @@ project(NdimGaussian LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(ENABLE_VTUNE_RELWITHDEBINFO "Enable VTune-friendly symbols and stack flags for RelWithDebInfo." ON)
 
 # ==================== Build flags ====================
 if(MSVC)
   add_definitions(-DEIGEN_NO_DEBUG)
 
-  # ---- Common: treat Release + ReleaseWithDebInfo as "production-optimized"
+  # ---- Common: treat Release + RelWithDebInfo as "production-optimized"
   # Use generator expressions so it works for multi-config generators (VS).
-  foreach(cfg Release ReleaseWithDebInfo)
+  # Keep ReleaseWithDebInfo as a compatibility alias for older local build dirs.
+  foreach(cfg Release RelWithDebInfo ReleaseWithDebInfo)
     add_compile_options($<$<CONFIG:${cfg}>:/O2>)
-    add_compile_options($<$<CONFIG:${cfg}>:/Ob3>)
-    #add_compile_options($<$<CONFIG:${cfg}>:/GL>)
+    add_compile_options($<$<CONFIG:${cfg}>:/Ob2>)
+    add_compile_options($<$<CONFIG:${cfg}>:/Gy>)
+    add_compile_options($<$<CONFIG:${cfg}>:/Gw>)
     add_compile_options($<$<CONFIG:${cfg}>:/arch:AVX2>)
     add_compile_options($<$<CONFIG:${cfg}>:/DNDEBUG>)
 
-    #add_link_options($<$<CONFIG:${cfg}>:/LTCG>)
     add_link_options($<$<CONFIG:${cfg}>:/OPT:REF>)
     add_link_options($<$<CONFIG:${cfg}>:/OPT:ICF>)
+    add_link_options($<$<CONFIG:${cfg}>:/INCREMENTAL:NO>)
   endforeach()
 
-  # ---- Debug symbols for VTune (ReleaseWithDebInfo only)
-  # /Zi + /DEBUG gives PDB + source line resolution in VTune.
-  add_compile_options($<$<CONFIG:ReleaseWithDebInfo>:/Zi>)
-  add_link_options($<$<CONFIG:ReleaseWithDebInfo>:/DEBUG>)
-  # Optional but often helps call stacks / line mapping with LTCG:
-  add_link_options($<$<CONFIG:ReleaseWithDebInfo>:/DEBUG:FULL>)
-
-  # Optional: keep frame pointers for better stacks (small overhead)
-  # add_compile_options($<$<CONFIG:ReleaseWithDebInfo>:/Oy->)
+  if(ENABLE_VTUNE_RELWITHDEBINFO)
+    # ---- Debug symbols for VTune (RelWithDebInfo only)
+    # /Zi + /DEBUG:FULL gives PDBs and source line resolution in VTune.
+    # /Zo keeps optimized code more debuggable and /Oy- preserves frame pointers
+    # for more reliable call stacks.
+    foreach(cfg RelWithDebInfo ReleaseWithDebInfo)
+      add_compile_options($<$<CONFIG:${cfg}>:/Zi>)
+      add_compile_options($<$<CONFIG:${cfg}>:/Zo>)
+      add_compile_options($<$<CONFIG:${cfg}>:/Oy->)
+      add_link_options($<$<CONFIG:${cfg}>:/DEBUG>)
+      add_link_options($<$<CONFIG:${cfg}>:/DEBUG:FULL>)
+    endforeach()
+  endif()
 
 endif()
 # =====================================================
@@ -84,6 +93,7 @@ target_link_libraries(ndim_gaussian PRIVATE
 add_library(slam_graph
   src/slam/SlamGraph.cpp
   src/slam/SlamFactorGraph.cpp
+  src/slam/SyntheticSE2MG.cpp
 )
 
 target_include_directories(slam_graph
@@ -107,3 +117,9 @@ add_executable(test_hierarchy_gbp_nonlinear
 )
 target_link_libraries(test_hierarchy_gbp_nonlinear PRIVATE ndim_gaussian slam_graph)
 target_link_directories(test_hierarchy_gbp_nonlinear PRIVATE "${VCPKG_LIB_DIR}")
+
+add_executable(test_synthetic_se2_mg_svd
+  src/slam/test_synthetic_se2_mg_svd.cpp
+)
+target_link_libraries(test_synthetic_se2_mg_svd PRIVATE ndim_gaussian slam_graph)
+target_link_directories(test_synthetic_se2_mg_svd PRIVATE "${VCPKG_LIB_DIR}")

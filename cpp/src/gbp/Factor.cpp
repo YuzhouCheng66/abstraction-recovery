@@ -196,6 +196,21 @@ void Factor::computeFactor(const Eigen::VectorXd& linpoint_in, bool update_self)
         }
         factor.setEta(eta_f_);
     }
+
+    if (d0_ == 3 && d1_ == 3 && D_ == 6) {
+        eta0_3_ = eta_f_.template segment<3>(0);
+        eta1_3_ = eta_f_.template segment<3>(3);
+
+        loo0_3_ = lambda_cache_.template block<3, 3>(0, 0);
+        lono0_3_ = lambda_cache_.template block<3, 3>(0, 3);
+        lnoo0_3_ = lambda_cache_.template block<3, 3>(3, 0);
+        lnono0_3_ = lambda_cache_.template block<3, 3>(3, 3);
+
+        loo1_3_ = lambda_cache_.template block<3, 3>(3, 3);
+        lono1_3_ = lambda_cache_.template block<3, 3>(3, 0);
+        lnoo1_3_ = lambda_cache_.template block<3, 3>(0, 3);
+        lnono1_3_ = lambda_cache_.template block<3, 3>(0, 0);
+    }
 }
 
 // ==============================
@@ -332,6 +347,103 @@ void Factor::computeMessages(double eta_damping) {
             utils::NdimGaussian& outMsg = messages_next[1];
             std::memcpy(outMsg.etaData(), outEta2.data(), 2 * sizeof(double));
             std::memcpy(outMsg.lamData(), outLam2.data(), 4 * sizeof(double));
+        }
+
+        messages.swap(messages_next);
+        return;
+    }
+
+    // ------------------------------------------------------------
+    // Fast path: 3D-3D binary factor (synthetic SE2 hot path)
+    // ------------------------------------------------------------
+    if (d0_ == 3 && d1_ == 3 && D_ == 6) {
+        using Vec3 = Eigen::Matrix<double, 3, 1>;
+        using Mat3 = Eigen::Matrix<double, 3, 3>;
+
+        const Eigen::Map<const Vec3> old0_eta(messages[0].etaData());
+        const Eigen::Map<const Vec3> old1_eta(messages[1].etaData());
+        const Eigen::Map<const Mat3> old0_lam(messages[0].lamData());
+        const Eigen::Map<const Mat3> old1_lam(messages[1].lamData());
+
+        const auto& b0 = adj_var_nodes[0]->belief;
+        const auto& b1 = adj_var_nodes[1]->belief;
+        const Eigen::Map<const Vec3> b0_eta(b0.etaData());
+        const Eigen::Map<const Vec3> b1_eta(b1.etaData());
+        const Eigen::Map<const Mat3> b0_lam(b0.lamData());
+        const Eigen::Map<const Mat3> b1_lam(b1.lamData());
+
+        const double s = 1.0 - a;
+
+        {
+            const Vec3& eo = eta0_3_;
+            Vec3 eno = eta1_3_;
+            eno.noalias() += (b1_eta - old1_eta);
+
+            const Mat3& loo = loo0_3_;
+            const Mat3& lono = lono0_3_;
+            const Mat3& lnoo = lnoo0_3_;
+
+            Mat3 lnono = lnono0_3_;
+            lnono.noalias() += (b1_lam - old1_lam);
+            lnono.diagonal().array() += kJitter;
+
+            llt3_0_.compute(lnono);
+            if (llt3_0_.info() != Eigen::Success) {
+                throw std::runtime_error("LLT failed in Factor::computeMessages (3D fast path, target=0)");
+            }
+
+            const Mat3 Y = llt3_0_.solve(lnoo);
+            const Vec3 y = llt3_0_.solve(eno);
+
+            Mat3 outLam3 = loo - lono * Y;
+            Vec3 outEta3 = eo - lono * y;
+
+            if (a != 0.0) {
+                outLam3 *= s;
+                outEta3 *= s;
+                outLam3.noalias() += a * old0_lam;
+                outEta3.noalias() += a * old0_eta;
+            }
+
+            utils::NdimGaussian& outMsg = messages_next[0];
+            std::memcpy(outMsg.etaData(), outEta3.data(), 3 * sizeof(double));
+            std::memcpy(outMsg.lamData(), outLam3.data(), 9 * sizeof(double));
+        }
+
+        {
+            const Vec3& eo = eta1_3_;
+            Vec3 eno = eta0_3_;
+            eno.noalias() += (b0_eta - old0_eta);
+
+            const Mat3& loo = loo1_3_;
+            const Mat3& lono = lono1_3_;
+            const Mat3& lnoo = lnoo1_3_;
+
+            Mat3 lnono = lnono1_3_;
+            lnono.noalias() += (b0_lam - old0_lam);
+            lnono.diagonal().array() += kJitter;
+
+            llt3_1_.compute(lnono);
+            if (llt3_1_.info() != Eigen::Success) {
+                throw std::runtime_error("LLT failed in Factor::computeMessages (3D fast path, target=1)");
+            }
+
+            const Mat3 Y = llt3_1_.solve(lnoo);
+            const Vec3 y = llt3_1_.solve(eno);
+
+            Mat3 outLam3 = loo - lono * Y;
+            Vec3 outEta3 = eo - lono * y;
+
+            if (a != 0.0) {
+                outLam3 *= s;
+                outEta3 *= s;
+                outLam3.noalias() += a * old1_lam;
+                outEta3.noalias() += a * old1_eta;
+            }
+
+            utils::NdimGaussian& outMsg = messages_next[1];
+            std::memcpy(outMsg.etaData(), outEta3.data(), 3 * sizeof(double));
+            std::memcpy(outMsg.lamData(), outLam3.data(), 9 * sizeof(double));
         }
 
         messages.swap(messages_next);

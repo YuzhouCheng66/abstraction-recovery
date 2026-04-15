@@ -40,15 +40,21 @@ public:
 
     // Main routines
     void updateBelief();          // prior + sum incoming factor->messages[local_idx]
+    void updateBeliefNoMu();      // same as updateBelief but leaves mu dirty
+    void refreshMu();             // recompute mu from current belief if needed
+    void markMuCurrent() { mu_valid_ = true; }
 
 
 private:
     static constexpr double kJitter = 1e-12;
+    void updateBeliefImpl_(bool update_mu);
 
     // ---- scratch/cache (allocated once, reused; dimensions fixed after construction) ----
     Eigen::VectorXd eta_acc_;     // size dofs: accumulator for eta
     Eigen::MatrixXd lam_acc_;     // size dofs x dofs: accumulator for lambda
     Eigen::MatrixXd lam_work_;    // size dofs x dofs: lam_acc_ + jitter (factorization input)
+    Eigen::LLT<Eigen::Matrix3d> llt3_;
+    bool mu_valid_ = true;
 
 private:
     // Ensure caches are initialized to current dofs (safe-guard).

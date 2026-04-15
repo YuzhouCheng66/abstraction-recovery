@@ -4,6 +4,7 @@
 #include <memory>
 #include <functional>
 #include <atomic>
+#include <utility>
 #include <cstdint>
 #include <thread>
 #include <omp.h>
@@ -30,6 +31,12 @@ public:
 
     bool nonlinear_factors = false; // 目前你的phase: false/unused
     double eta_damping = 0.0;
+    bool strict_compare_mode = false;
+    int sync_num_threads = 0; // 0 => OpenMP/runtime default
+    bool sync_update_means = true;
+    bool profile_sync_timing = false;
+    double sync_factor_pass_sec_accum = 0.0;
+    double sync_variable_pass_sec_accum = 0.0;
 
     std::vector<std::unique_ptr<VariableNode>> var_nodes;
     std::vector<std::unique_ptr<Factor>> factors;
@@ -95,6 +102,12 @@ public:
     );
 
     void connect(Factor* f, VariableNode* v, int local_idx);
+
+    void setStrictCompareMode(bool enabled) { strict_compare_mode = enabled; }
+    void setSyncNumThreads(int n_threads) { sync_num_threads = n_threads; }
+    void setSyncUpdateMeans(bool enabled) { sync_update_means = enabled; }
+    void setProfileSyncTiming(bool enabled) { profile_sync_timing = enabled; }
+    void resetSyncTiming() { sync_factor_pass_sec_accum = 0.0; sync_variable_pass_sec_accum = 0.0; }
 
     // synchronous iteration (like Python synchronous_iteration)
     void synchronousIteration(bool robustify=false);

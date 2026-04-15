@@ -52,7 +52,7 @@ public:
     void computeMessagesFixedLam(double eta_damping);
 
 private:
-    static constexpr double kJitter = 1e-12;
+    static constexpr double kJitter = 1e-10;
 
     // ==========================
     // Fixed dimensions (set once)
@@ -115,8 +115,21 @@ private:
 
     mutable Eigen::LLT<Eigen::Matrix2d> llt0_;  // target=0 消元用
     mutable Eigen::LLT<Eigen::Matrix2d> llt1_;  // target=1 消元用
+    mutable Eigen::LLT<Eigen::Matrix3d> llt3_0_;
+    mutable Eigen::LLT<Eigen::Matrix3d> llt3_1_;
     bool llt_valid0_ = false;
     bool llt_valid1_ = false;
+
+    Eigen::Vector3d eta0_3_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d eta1_3_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d loo0_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d lono0_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d lnoo0_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d lnono0_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d loo1_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d lono1_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d lnoo1_3_ = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d lnono1_3_ = Eigen::Matrix3d::Zero();
 
 private:
     void initWorkspace_();
